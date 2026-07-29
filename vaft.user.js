@@ -5,7 +5,7 @@
 // @description  Twitch ad blocking (vaft), forked from TwitchAdSolutions
 // @updateURL    https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
-// @author       https://github.com/cleanlock/VideoAdBlockForTwitch#credits
+// @author       https://github.com/scamorza
 // @match        *://*.twitch.tv/*
 // @run-at       document-start
 // @inject-into  page
