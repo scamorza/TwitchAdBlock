@@ -48,9 +48,12 @@ this one and silently disable it.
 ## Known issues (inherited from upstream)
 
 - Freezing / buffering / repeating segments around ad transitions — see the
-  `PlayerBuffering*` options in `vaft.user.js`.
-- Streams can appear "offline" during ad breaks.
-- No mobile (`m.twitch.tv`) support.
+  `PlayerBuffering*` options in `vaft.user.js`
+  ([#1](https://github.com/scamorza/TwitchAdBlock/issues/1)).
+- Streams can appear "offline" during ad breaks
+  ([#2](https://github.com/scamorza/TwitchAdBlock/issues/2)).
+- No mobile (`m.twitch.tv`) support — out of scope for this fork, so there is
+  no issue tracking it.
 
 ## Project status
 
