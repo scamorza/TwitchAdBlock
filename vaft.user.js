@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAd
-// @version      1.1.0
+// @version      1.2.0
 // @description  Twitch ad blocking (vaft), forked from TwitchAdSolutions
 // @updateURL    https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
@@ -13,6 +13,20 @@
 // ==/UserScript==
 (function() {
     'use strict';
+    // Our @match hits every *.twitch.tv frame, including the hidden auth/ads/analytics
+    // iframes Twitch loads alongside the player -- without this check vaft runs once per
+    // frame and each copy hooks window.Worker independently (this is what caused the
+    // duplicate "[VAFT] hookWorkerFetch" log). Only run in the top frame, or in an actual
+    // Twitch embed player (window.frameElement is unreadable across origins, hence the try).
+    let isNestedFrame = false;
+    try { isNestedFrame = window.frameElement !== null; } catch (e) { isNestedFrame = true; }
+    if (isNestedFrame) {
+        const host = document.location.hostname;
+        const isEmbedContext = host === 'player.twitch.tv' || host === 'embed.twitch.tv' || document.location.pathname.startsWith('/embed/');
+        if (!isEmbedContext) {
+            return;
+        }
+    }
     const ourTwitchAdSolutionsVersion = 1;// Used to prevent conflicts with outdated versions of the scripts
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log("[VAFT] skipping vaft as there's another script active. ourVersion:" + ourTwitchAdSolutionsVersion + " activeVersion:" + window.twitchAdSolutionsVersion);
