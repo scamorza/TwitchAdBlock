@@ -1,30 +1,33 @@
 # vaft
 
-Continuation of the `vaft` ad-blocking userscript from
-[pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions)
-(archived 2026-03-05). History has been filtered to only the commits that
-touched the `vaft/` folder in the original repo.
+Forked from [pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions).
+Thanks to pixeltris for the work put into this script and into every other
+tool in the original repository.
 
-`vaft` intercepts Twitch's player worker and GQL requests at page-load time,
-tries to fetch a clean (ad-free) stream, and falls back to stripping ad
-segments from the HLS manifest when it can't.
+## Why this fork
 
-## Files
+I personally think it's fair to support creators, whether that means
+watching a few ads or subscribing to skip them. The problem starts when
+Twitch and streamers begin spamming 150 ads a minute and almost every stream
+becomes unwatchable. I believe viewers should be encouraged to support a
+creator, not forced into subscribing to the point of exasperation. That's
+why I decided to keep this project going.
 
-- `vaft.user.js` — userscript for Tampermonkey / Violentmonkey.
-- `vaft-ublock-origin.js` — same logic packaged as a uBlock Origin resource.
+## What we're carrying forward
 
-## Applying (userscript)
+Unlike the original repository, this fork only maintains `vaft` in the
+Tampermonkey-loadable form (`vaft.user.js`). The uBlock Origin variant and
+every other tool from the original repo (`strip`, `video-swap-new`) are not
+part of this fork, at least for now — the scope may grow down the line.
 
-Open `vaft.user.js` in a browser with a userscript manager installed and
-confirm the install prompt.
+`vaft` attempts to get a clean stream as fast as it can. If it fails to get
+a clean stream, it removes ad segments instead.
 
-## Applying (uBlock Origin)
+## Usage
 
-- uBlock Origin dashboard → `My filters` → add `twitch.tv##+js(twitch-videoad)`
-- `Settings` → enable `I am an advanced user` → set `userResourcesLocation`
-  to the local/raw URL of `vaft-ublock-origin.js`
-- Restart the browser / toggle the extension so uBlock reloads resources
+Install a userscript manager (e.g. [Tampermonkey](https://www.tampermonkey.net/)
+or [Violentmonkey](https://violentmonkey.github.io/)), then open
+`vaft.user.js`: the manager should prompt you to install the script.
 
 ## Known issues (inherited from upstream)
 
@@ -33,7 +36,7 @@ confirm the install prompt.
 - Streams can appear "offline" during ad breaks.
 - No mobile (`m.twitch.tv`) support.
 
-## Status
+## Project status
 
-Twitch changes its player/GQL internals periodically, which breaks scripts
-like this one — expect ongoing maintenance rather than a one-time fix.
+Twitch periodically changes its player and internal APIs, which breaks
+scripts like this one — expect ongoing maintenance, not a one-time fix.
