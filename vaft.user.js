@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAd
-// @version      1.2.0
+// @version      1.2.1
 // @description  Twitch ad blocking (vaft), forked from TwitchAdSolutions
 // @updateURL    https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
@@ -13,17 +13,20 @@
 // ==/UserScript==
 (function() {
     'use strict';
-    // Our @match hits every *.twitch.tv frame, including the hidden auth/ads/analytics
-    // iframes Twitch loads alongside the player -- without this check vaft runs once per
-    // frame and each copy hooks window.Worker independently (this is what caused the
-    // duplicate "[VAFT] hookWorkerFetch" log). Only run in the top frame, or in an actual
-    // Twitch embed player (window.frameElement is unreadable across origins, hence the try).
-    let isNestedFrame = false;
-    try { isNestedFrame = window.frameElement !== null; } catch (e) { isNestedFrame = true; }
-    if (isNestedFrame) {
+    // Our @match hits every *.twitch.tv frame, including the hidden auth/ads/analytics ones. Only run
+    // in the top frame or in a real embed player. window.frameElement is no use here, it returns null
+    // instead of throwing when the parent is cross-origin (which is the case for those frames)
+    if (window.self !== window.top) {
         const host = document.location.hostname;
-        const isEmbedContext = host === 'player.twitch.tv' || host === 'embed.twitch.tv' || document.location.pathname.startsWith('/embed/');
+        const path = document.location.pathname;
+        // The clip embed is clips.twitch.tv/embed?clip=... (no trailing slash). The chat-only embed
+        // has no player, so it stays out even though it lives under /embed/
+        const isChatEmbed = /^\/embed\/[^/]+\/chat\/?$/.test(path);
+        const isEmbedContext = !isChatEmbed && (host === 'player.twitch.tv' || host === 'embed.twitch.tv'
+            || host === 'clips.twitch.tv' || host === 'm.twitch.tv'
+            || path === '/embed' || path.startsWith('/embed/'));
         if (!isEmbedContext) {
+            console.log('[VAFT] skipping vaft in nested frame ' + document.location.href);
             return;
         }
     }
@@ -210,6 +213,10 @@
                 `;
                 super(URL.createObjectURL(new Blob([newBlobStr])), options);
                 twitchWorkers.push(this);
+                // 'hookWorkerFetch' is logged from inside the worker and can't say which frame or player
+                // instance it came from. Twitch makes one worker per player, so more than one is normal
+                console.log('[VAFT] Twitch worker #' + twitchWorkers.length + ' created in '
+                    + (window.self === window.top ? 'top frame ' : 'nested frame ') + document.location.href);
                 this.addEventListener('message', (e) => {
                     if (e.data.key == 'UpdateAdBlockBanner') {
                         updateAdblockBanner(e.data);
@@ -979,9 +986,41 @@
                     if (typeof init.headers['Authorization'] === 'string' && init.headers['Authorization'] !== AuthorizationHeader) {
                         postTwitchWorkerMessage('UpdateAuthorizationHeader', AuthorizationHeader = init.headers['Authorization']);
                     }
-                    // Get rid of mini player above chat - TODO: Reject this locally instead of having server reject it
+                    // Get rid of mini player above chat. Denied locally instead of sending an empty body for
+                    // the server to reject; Twitch creates the player's worker either way. Keep above the
+                    // ForceAccessTokenPlayerType block, which would rewrite this request's playerType
                     if (init && typeof init.body === 'string' && init.body.includes('PlaybackAccessToken') && init.body.includes('picture-by-picture')) {
-                        init.body = '';
+                        // Shaped like a real GQL failure. Generic message, the client may report it back
+                        const deniedToken = () => ({
+                            data: {streamPlaybackAccessToken: null, videoPlaybackAccessToken: null},
+                            errors: [{message: 'forbidden'}]
+                        });
+                        // Sending the empty body used to get back a 400 'unable to read request body'. A 200
+                        // is less likely to be retried, but that 400 is the fallback if the mini player returns
+                        const jsonResponse = (body) => Promise.resolve(new Response(JSON.stringify(body), {
+                            status: 200,
+                            headers: {'Content-Type': 'application/json'}
+                        }));
+                        const isPictureByPicture = (operation) => typeof operation?.variables?.playerType === 'string'
+                            && operation.variables.playerType.includes('picture-by-picture');
+                        try {
+                            const operations = JSON.parse(init.body);
+                            if (!Array.isArray(operations)) {
+                                if (isPictureByPicture(operations)) {
+                                    console.log('[VAFT] Denied picture-by-picture access token locally');
+                                    return jsonResponse(deniedToken());
+                                }
+                            } else if (operations.length > 0 && operations.every(isPictureByPicture)) {
+                                console.log('[VAFT] Denied picture-by-picture access token batch locally');
+                                return jsonResponse(operations.map(() => deniedToken()));
+                            } else if (operations.some(isPictureByPicture)) {
+                                // Responses are matched by position, so denying one entry of a batch means
+                                // splicing it back at its index. Twitch doesn't batch this one, so don't bother
+                                init.body = '';
+                            }
+                        } catch {
+                            init.body = '';// Unparseable, let the server reject it as before
+                        }
                     }
                     if (ForceAccessTokenPlayerType && typeof init.body === 'string' && init.body.includes('PlaybackAccessToken')) {
                         let replacedPlayerType = '';
@@ -1039,15 +1078,14 @@
             e.stopImmediatePropagation();
         };
         let wasVideoPlaying = true;
-        // Ported from CommanderRoot's "Disable automatic video downscale" script.
-        // Lets the very first visibilitychange through when a stream was opened
-        // in a background tab, avoiding a black screen on first play.
-        const initialHidden = hidden.apply(document);
+        // Lets the first visibilitychange through when a stream was opened in a background tab,
+        // otherwise the video stays black until the next one
+        const initialHidden = hidden ? hidden.apply(document) === true : false;
         let didInitialPlay = false;
         const visibilityChange = e => {
             const isChrome = typeof chrome !== 'undefined';
             const videos = document.getElementsByTagName('video');
-            const isHidden = hidden.apply(document) === true || (webkitHidden && webkitHidden.apply(document) === true);
+            const isHidden = (hidden && hidden.apply(document) === true) || (webkitHidden && webkitHidden.apply(document) === true);
             if (videos.length > 0) {
                 if (isHidden) {
                     wasVideoPlaying = !videos[0].paused && !videos[0].ended;
@@ -1061,13 +1099,12 @@
                     }
                 }
             }
-            if (PreventAutoDownscale && !isHidden && initialHidden === true && didInitialPlay === false) {
-                // Allow propagation to prevent black screen when a stream was opened in a new tab
+            if (PreventAutoDownscale && !isHidden && initialHidden === true && didInitialPlay === false && e.type === 'visibilitychange') {
+                // Only the unprefixed event, which is the one Twitch listens to. The three listeners
+                // below share this handler, so the first alias to fire would otherwise eat the one shot
+                didInitialPlay = true;
             } else {
                 block(e);
-            }
-            if (isHidden) {
-                didInitialPlay = true;
             }
         };
         document.addEventListener('visibilitychange', visibilityChange, true);
@@ -1129,7 +1166,7 @@
     // Ported from CommanderRoot's "Disable automatic video downscale" script.
     function setQualitySettings() {
         try {
-            localStorage.setItem('s-qs-ts', Math.floor(Date.now()));
+            localStorage.setItem('s-qs-ts', Date.now());
             localStorage.setItem('quality-bitrate', '9840720');
             localStorage.setItem('video-quality', '{"default":"1080p60"}');
         } catch (err) {
@@ -1141,8 +1178,29 @@
     hookFetch();
     if (PreventAutoDownscale) {
         setQualitySettings();
-        // Handles switching between pages without a full reload (e.g. from a Clip back to a live stream)
-        window.addEventListener('popstate', () => setQualitySettings());
+        // Reapply when switching page without a full reload (e.g. from a Clip back to a live stream).
+        // popstate only covers back/forward, link clicks go through pushState. Only on a real path
+        // change, replaceState fires a lot and this writes to localStorage
+        let lastPath = document.location.pathname;
+        const onNavigation = () => {
+            if (document.location.pathname === lastPath) {
+                return;
+            }
+            lastPath = document.location.pathname;
+            setQualitySettings();
+        };
+        window.addEventListener('popstate', onNavigation);
+        ['pushState', 'replaceState'].forEach(name => {
+            const original = history[name];
+            if (typeof original !== 'function') {
+                return;
+            }
+            history[name] = function() {
+                const result = original.apply(this, arguments);
+                onNavigation();
+                return result;
+            };
+        });
     }
     if (PlayerBufferingFix) {
         monitorPlayerBuffering();
