@@ -29,6 +29,11 @@ Install a userscript manager (e.g. [Tampermonkey](https://www.tampermonkey.net/)
 or [Violentmonkey](https://violentmonkey.github.io/)), then open
 `vaft.user.js`: the manager should prompt you to install the script.
 
+If you're a former user of the original `vaft` (or any other script from the
+TwitchAdSolutions family), make sure to remove it first — this fork resets
+its own version counter, so an old script may end up taking priority over
+this one and silently disable it.
+
 ## Known issues (inherited from upstream)
 
 - Freezing / buffering / repeating segments around ad transitions — see the
