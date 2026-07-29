@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
-// @namespace    https://github.com/scamorza/TwitchAd
-// @version      1.2.1
+// @namespace    https://github.com/scamorza/TwitchAdBlock
+// @version      1.2.2
 // @description  Twitch ad blocking (vaft), forked from TwitchAdSolutions
-// @updateURL    https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
-// @downloadURL  https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
+// @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
+// @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @author       https://github.com/scamorza
 // @match        *://*.twitch.tv/*
 // @run-at       document-start
