@@ -40,3 +40,12 @@ or [Violentmonkey](https://violentmonkey.github.io/)), then open
 
 Twitch periodically changes its player and internal APIs, which breaks
 scripts like this one — expect ongoing maintenance, not a one-time fix.
+
+## Disclaimer
+
+Twitch does not approve of or endorse ad-blocking tools like this one, and
+using it goes against their Terms of Service. Using `vaft` is entirely at
+your own risk, including the possibility of account suspension or a ban.
+This project is provided "as is", with no warranty of any kind — the
+author(s) take no responsibility for any consequences, direct or indirect,
+resulting from its use.
