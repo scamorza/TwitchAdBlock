@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAd
-// @version      1.0.0
+// @version      1.1.0
 // @description  Twitch ad blocking (vaft), forked from TwitchAdSolutions
 // @updateURL    https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAd/raw/master/vaft.user.js
@@ -15,7 +15,7 @@
     'use strict';
     const ourTwitchAdSolutionsVersion = 1;// Used to prevent conflicts with outdated versions of the scripts
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
-        console.log("skipping vaft as there's another script active. ourVersion:" + ourTwitchAdSolutionsVersion + " activeVersion:" + window.twitchAdSolutionsVersion);
+        console.log("[VAFT] skipping vaft as there's another script active. ourVersion:" + ourTwitchAdSolutionsVersion + " activeVersion:" + window.twitchAdSolutionsVersion);
         window.twitchAdSolutionsVersion = ourTwitchAdSolutionsVersion;
         return;
     }
@@ -57,6 +57,7 @@
         scope.IsAdStrippingEnabled = true;
         scope.AdSegmentCache = new Map();
         scope.AllSegmentsAreAdSegments = false;
+        scope.PreventAutoDownscale = true;// Forces "Source"/1080p60 quality and stops Twitch from downscaling/detecting focus loss while the tab is backgrounded (ported from CommanderRoot's "Disable automatic video downscale" script). Set to false to disable and keep only vaft's own ad blocking behavior.
     }
     let isActivelyStrippingAds = false;
     let localStorageHookFailed = false;
@@ -184,10 +185,10 @@
                             HasTriggeredPlayerReload = true;
                         } else if (e.data.key == 'SimulateAds') {
                             SimulatedAdsDepth = e.data.value;
-                            console.log('SimulatedAdsDepth: ' + SimulatedAdsDepth);
+                            console.log('[VAFT] SimulatedAdsDepth: ' + SimulatedAdsDepth);
                         } else if (e.data.key == 'AllSegmentsAreAdSegments') {
                             AllSegmentsAreAdSegments = !AllSegmentsAreAdSegments;
-                            console.log('AllSegmentsAreAdSegments: ' + AllSegmentsAreAdSegments);
+                            console.log('[VAFT] AllSegmentsAreAdSegments: ' + AllSegmentsAreAdSegments);
                         }
                     });
                     hookWorkerFetch();
@@ -225,7 +226,7 @@
                 if (isValidWorker(value)) {
                     workerInstance = value;
                 } else {
-                    console.log('Attempt to set twitch worker denied');
+                    console.log('[VAFT] Attempt to set twitch worker denied');
                 }
             }
         });
@@ -238,7 +239,7 @@
         return req.responseText;
     }
     function hookWorkerFetch() {
-        console.log('hookWorkerFetch (vaft)');
+        console.log('[VAFT] hookWorkerFetch');
         const realFetch = fetch;
         fetch = async function(url, options) {
             if (typeof url === 'string') {
@@ -344,7 +345,7 @@
                                                             const [streamWidthB, streamHeightB] = b.Resolution.split('x').map(Number);
                                                             return Math.abs((streamWidthA * streamHeightA) - (targetWidth * targetHeight)) - Math.abs((streamWidthB * streamHeightB) - (targetWidth * targetHeight));
                                                         })[0];
-                                                        console.log('ModifiedM3U8 swap ' + resSettings[codecsKey] + ' to ' + newResolutionInfo.Codecs + ' oldRes:' + oldResolution + ' newRes:' + newResolutionInfo.Resolution);
+                                                        console.log('[VAFT] ModifiedM3U8 swap ' + resSettings[codecsKey] + ' to ' + newResolutionInfo.Codecs + ' oldRes:' + oldResolution + ' newRes:' + newResolutionInfo.Resolution);
                                                         lines[i] = lines[i].replace(/CODECS="[^"]+"/, `CODECS="${newResolutionInfo.Codecs}"`);
                                                         lines[i + 1] = newResolutionInfo.Url + ' '.repeat(i + 1);// The stream doesn't load unless each url line is unique
                                                     }
@@ -499,7 +500,7 @@
             }
             const currentResolution = streamInfo.Urls[url];
             if (!currentResolution) {
-                console.log('Ads will leak due to missing resolution info for ' + url);
+                console.log('[VAFT] Ads will leak due to missing resolution info for ' + url);
                 return textStr;
             }
             const isHevc = currentResolution.Codecs.startsWith('hev') || currentResolution.Codecs.startsWith('hvc');
@@ -585,7 +586,7 @@
                 textStr = backupM3u8;
                 if (streamInfo.ActiveBackupPlayerType != backupPlayerType) {
                     streamInfo.ActiveBackupPlayerType = backupPlayerType;
-                    console.log(`Blocking${(streamInfo.IsMidroll ? ' midroll ' : ' ')}ads (${backupPlayerType})`);
+                    console.log(`[VAFT] Blocking${(streamInfo.IsMidroll ? ' midroll ' : ' ')}ads (${backupPlayerType})`);
                 }
             }
             // TODO: Improve hevc stripping. It should always strip when there is a codec mismatch (both ways)
@@ -594,7 +595,7 @@
                 textStr = stripAdSegments(textStr, stripHevc, streamInfo);
             }
         } else if (streamInfo.IsShowingAd) {
-            console.log('Finished blocking ads');
+            console.log('[VAFT] Finished blocking ads');
             streamInfo.IsShowingAd = false;
             streamInfo.IsStrippingAdSegments = false;
             streamInfo.NumStrippedAdSegments = 0;
@@ -740,7 +741,7 @@
                         ) {
                             playerBufferState.numSame++;
                             if (playerBufferState.numSame == PlayerBufferingSameStateCount) {
-                                console.log('Attempt to fix buffering position:' + playerBufferState.position + ' bufferedPosition:' + playerBufferState.bufferedPosition + ' bufferDuration:' + playerBufferState.bufferDuration);
+                                console.log('[VAFT] Attempt to fix buffering position:' + playerBufferState.position + ' bufferedPosition:' + playerBufferState.bufferedPosition + ' bufferDuration:' + playerBufferState.bufferDuration);
                                 const isPausePlay = !PlayerBufferingDoPlayerReload;
                                 const isReload = PlayerBufferingDoPlayerReload;
                                 doTwitchPlayerTask(isPausePlay, isReload);
@@ -758,7 +759,7 @@
                     }
                 }
             } catch (err) {
-                console.error('error when monitoring player for buffering: ' + err);
+                console.error('[VAFT] error when monitoring player for buffering: ' + err);
                 playerForMonitoringBuffering = null;
             }
         }
@@ -847,17 +848,17 @@
     function doTwitchPlayerTask(isPausePlay, isReload) {
         const playerAndState = getPlayerAndState();
         if (!playerAndState) {
-            console.log('Could not find react root');
+            console.log('[VAFT] Could not find react root');
             return;
         }
         const player = playerAndState.player;
         const playerState = playerAndState.state;
         if (!player) {
-            console.log('Could not find player');
+            console.log('[VAFT] Could not find player');
             return;
         }
         if (!playerState) {
-            console.log('Could not find player state');
+            console.log('[VAFT] Could not find player state');
             return;
         }
         if (player.isPaused() || player.core?.paused) {
@@ -889,7 +890,7 @@
                     localStorage.setItem(lsKeyQuality, JSON.stringify({default:player.core.state.quality.group}));
                 }
             } catch {}
-            console.log('Reloading Twitch player');
+            console.log('[VAFT] Reloading Twitch player');
             playerState.setSrc({ isNewMediaPlayerInstance: true, refreshAccessToken: true });
             postTwitchWorkerMessage('TriggeredPlayerReload');
             player.play();
@@ -985,7 +986,7 @@
                             }
                         }
                         if (replacedPlayerType) {
-                            console.log(`Replaced '${replacedPlayerType}' player type with '${ForceAccessTokenPlayerType}' player type`);
+                            console.log(`[VAFT] Replaced '${replacedPlayerType}' player type with '${ForceAccessTokenPlayerType}' player type`);
                             init.body = JSON.stringify(newBody);
                         }
                     }
@@ -1013,17 +1014,28 @@
                 }
             });
         }catch{}
+        if (PreventAutoDownscale) {
+            try {
+                document.hasFocus = () => true;
+            } catch {}
+        }
         const block = e => {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
         };
         let wasVideoPlaying = true;
+        // Ported from CommanderRoot's "Disable automatic video downscale" script.
+        // Lets the very first visibilitychange through when a stream was opened
+        // in a background tab, avoiding a black screen on first play.
+        const initialHidden = hidden.apply(document);
+        let didInitialPlay = false;
         const visibilityChange = e => {
             const isChrome = typeof chrome !== 'undefined';
             const videos = document.getElementsByTagName('video');
+            const isHidden = hidden.apply(document) === true || (webkitHidden && webkitHidden.apply(document) === true);
             if (videos.length > 0) {
-                if (hidden.apply(document) === true || (webkitHidden && webkitHidden.apply(document) === true)) {
+                if (isHidden) {
                     wasVideoPlaying = !videos[0].paused && !videos[0].ended;
                 } else {
                     if (!playerBufferState.hasStreamStarted) {
@@ -1035,7 +1047,14 @@
                     }
                 }
             }
-            block(e);
+            if (PreventAutoDownscale && !isHidden && initialHidden === true && didInitialPlay === false) {
+                // Allow propagation to prevent black screen when a stream was opened in a new tab
+            } else {
+                block(e);
+            }
+            if (isHidden) {
+                didInitialPlay = true;
+            }
         };
         document.addEventListener('visibilitychange', visibilityChange, true);
         document.addEventListener('webkitvisibilitychange', visibilityChange, true);
@@ -1089,13 +1108,28 @@
                 localStorageHookFailed = true;
             }
         } catch (err) {
-            console.log('localStorageHooks failed ' + err)
+            console.log('[VAFT] localStorageHooks failed ' + err)
             localStorageHookFailed = true;
+        }
+    }
+    // Ported from CommanderRoot's "Disable automatic video downscale" script.
+    function setQualitySettings() {
+        try {
+            localStorage.setItem('s-qs-ts', Math.floor(Date.now()));
+            localStorage.setItem('quality-bitrate', '9840720');
+            localStorage.setItem('video-quality', '{"default":"1080p60"}');
+        } catch (err) {
+            console.log('[VAFT] setQualitySettings failed ' + err);
         }
     }
     declareOptions(window);
     hookWindowWorker();
     hookFetch();
+    if (PreventAutoDownscale) {
+        setQualitySettings();
+        // Handles switching between pages without a full reload (e.g. from a Clip back to a live stream)
+        window.addEventListener('popstate', () => setQualitySettings());
+    }
     if (PlayerBufferingFix) {
         monitorPlayerBuffering();
     }
@@ -1108,7 +1142,7 @@
     }
     window.simulateAds = (depth) => {
         if (depth === undefined || depth < 0) {
-            console.log('Ad depth paramter required (0 = no simulated ad, 1+ = use backup player for given depth)');
+            console.log('[VAFT] Ad depth paramter required (0 = no simulated ad, 1+ = use backup player for given depth)');
             return;
         }
         postTwitchWorkerMessage('SimulateAds', depth);
