@@ -26,7 +26,7 @@
             || host === 'clips.twitch.tv' || host === 'm.twitch.tv'
             || path === '/embed' || path.startsWith('/embed/'));
         if (!isEmbedContext) {
-            console.log('[VAFT] skipping vaft in nested frame ' + document.location.href);
+            console.log('[VAFT] skipping vaft in nested frame');
             return;
         }
     }
@@ -216,7 +216,7 @@
                 // 'hookWorkerFetch' is logged from inside the worker and can't say which frame or player
                 // instance it came from. Twitch makes one worker per player, so more than one is normal
                 console.log('[VAFT] Twitch worker #' + twitchWorkers.length + ' created in '
-                    + (window.self === window.top ? 'top frame ' : 'nested frame ') + document.location.href);
+                    + (window.self === window.top ? 'top frame' : 'nested frame'));
                 this.addEventListener('message', (e) => {
                     if (e.data.key == 'UpdateAdBlockBanner') {
                         updateAdblockBanner(e.data);
