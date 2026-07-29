@@ -28,6 +28,11 @@ a clean stream, it removes ad segments instead.
 - `PreventAutoDownscale`: forces "Source"/1080p60 quality and stops Twitch
   from downscaling video while the tab is in the background (disable by
   setting `scope.PreventAutoDownscale = true` to `false` in `vaft.user.js`).
+  It also fakes `document.hasFocus()` as always `true` — the same check
+  Twitch uses to verify you're actively watching. As long as Twitch doesn't
+  change that method, this also means you can farm Drops with the tab in
+  the background and the stream's audio muted, on top of keeping max
+  quality.
 
 ## Usage
 
