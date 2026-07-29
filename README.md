@@ -23,11 +23,11 @@ part of this fork, at least for now — the scope may grow down the line.
 `vaft` attempts to get a clean stream as fast as it can. If it fails to get
 a clean stream, it removes ad segments instead.
 
-## Features
+## Additional features
 
 - `PreventAutoDownscale`: forces "Source"/1080p60 quality and stops Twitch
   from downscaling video while the tab is in the background (disable by
-  setting it to `false` on line 60 of `vaft.user.js`).
+  setting `scope.PreventAutoDownscale = true` to `false` in `vaft.user.js`).
 
 ## Usage
 
