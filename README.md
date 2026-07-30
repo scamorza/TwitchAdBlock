@@ -1,54 +1,115 @@
-# vaft
+# vaft — Twitch ad blocking userscript
 
-Forked from [pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions).
-Thanks to pixeltris for the work put into this script and into every other
-tool in the original repository.
+A maintained fork of the `vaft` script from
+[pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions),
+kept in userscript form only. It tries to get you a clean stream as fast as it
+can, and strips ad segments from the playlist when it can't.
+
+## Install
+
+1. Install a userscript manager — [Tampermonkey](https://www.tampermonkey.net/)
+   or [Violentmonkey](https://violentmonkey.github.io/).
+2. Open
+   [`vaft.user.js`](https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js).
+   The manager will prompt you to install it.
+
+Updates are automatic: the script declares `@updateURL`, so the manager pulls
+new versions on its own update schedule.
+
+**If you already have another script from the TwitchAdSolutions family,
+remove it first.** This fork resets its own version counter, so an older
+script can take priority and silently disable this one. You will see it in the
+console as `[VAFT] skipping vaft as there's another script active`.
+
+## How it works
+
+Twitch stitches ads into the same HLS playlist as the stream, so there is no
+request to block. `vaft` hooks `window.Worker` and `window.fetch`, then works
+on the playlist itself:
+
+- It requests playback access tokens under a different player type
+  (`ForceAccessTokenPlayerType`, `BackupPlayerTypes`), because those streams
+  frequently come back without ads.
+- If every fallback still contains ads, `IsAdStrippingEnabled` removes the ad
+  segments (`AdSignifier`) from the M3U8 and serves the stream without them.
+- Around the transition it can pause/play or reload the player
+  (`ReloadPlayerAfterAd`, `AlwaysReloadPlayerOnAd`) and mitigate a player that
+  gets stuck buffering (`PlayerBufferingFix`).
 
 ## Why this fork
 
-I personally think it's fair to support creators, whether that means
-watching a few ads or subscribing to skip them. The problem starts when
-Twitch and streamers begin spamming 150 ads a minute and almost every stream
-becomes unwatchable. I believe viewers should be encouraged to support a
-creator, not forced into subscribing to the point of exasperation. That's
-why I decided to keep this project going.
+Supporting creators is fair, whether that means watching a few ads or
+subscribing to skip them. It stops being fair when the ad load makes streams
+unwatchable — viewers should be encouraged to support a creator, not worn down
+into subscribing. That is the reason this project is still maintained.
 
-## What we're carrying forward
+Scope is deliberately narrower than upstream: only `vaft`, only as
+`vaft.user.js`. The uBlock Origin variant and the other tools from the
+original repository (`strip`, `video-swap-new`) are not part of this fork for
+now.
 
-Unlike the original repository, this fork only maintains `vaft` in the
-Tampermonkey-loadable form (`vaft.user.js`). The uBlock Origin variant and
-every other tool from the original repo (`strip`, `video-swap-new`) are not
-part of this fork, at least for now — the scope may grow down the line.
+## Configuration
 
-`vaft` attempts to get a clean stream as fast as it can. If it fails to get
-a clean stream, it removes ad segments instead.
+All options live in `declareOptions()` at the top of `vaft.user.js`. Edit the
+installed script in your userscript manager.
 
-## Additional features
+| Option | Default | What it does |
+| --- | --- | --- |
+| `PreventAutoDownscale` | `true` | Forces Source/1080p60 and stops Twitch from downscaling a backgrounded tab. See below. |
+| `IsAdStrippingEnabled` | `true` | Strip ad segments when no clean stream could be obtained. |
+| `ReloadPlayerAfterAd` | `true` | Reload the player when the break ends instead of pause/play. |
+| `AlwaysReloadPlayerOnAd` | `false` | Pause/play on both entering and leaving a break. |
+| `SkipPlayerReloadOnHevc` | `false` | Skip the reload on 2k/4k streams. Enable if you get error #4000 / #3000 or a spinning wheel. |
+| `PlayerBufferingFix` | `true` | Detect a player stuck buffering and pause/play it. |
+| `ForceAccessTokenPlayerType` | `'popout'` | Player type sent in the `PlaybackAccessToken` request. |
+| `BackupPlayerTypes` | `embed`, `popout`, `autoplay` | Player types tried, in order, when looking for an ad-free stream. |
+| `FallbackPlayerType` | `'embed'` | Used when every backup type still has ads. |
 
-- `PreventAutoDownscale`: forces "Source"/1080p60 quality and stops Twitch
-  from downscaling video while the tab is in the background (disable by
-  setting `scope.PreventAutoDownscale = true` to `false` in `vaft.user.js`).
-  It also fakes `document.hasFocus()` as always `true` — the same check
-  Twitch uses to verify you're actively watching. As long as Twitch doesn't
-  change that method, this also means you can farm Drops with the tab in
-  the background and the stream's audio muted, on top of keeping max
-  quality.
+Buffering behaviour can be tuned further with `PlayerBufferingDelay`,
+`PlayerBufferingSameStateCount`, `PlayerBufferingMinRepeatDelay`,
+`PlayerBufferingDangerZone`, `PlayerBufferingDoPlayerReload` and
+`PlayerBufferingPrerollCheckEnabled` / `PlayerBufferingPrerollCheckOffset`.
+Each one is documented inline in the script.
 
-## Usage
+### PreventAutoDownscale
 
-Install a userscript manager (e.g. [Tampermonkey](https://www.tampermonkey.net/)
-or [Violentmonkey](https://violentmonkey.github.io/)), then open
-`vaft.user.js`: the manager should prompt you to install the script.
+Ported from CommanderRoot's "Disable automatic video downscale". It pins
+quality to Source/1080p60, blocks the visibility events Twitch uses to
+downscale a backgrounded tab, and fakes `document.hasFocus()` as always
+`true` — the same check Twitch uses to decide whether you are actively
+watching. A side effect is that Drops keep progressing with the tab in the
+background and the audio muted. Set it to `false` to keep only the ad
+blocking behaviour.
 
-If you're a former user of the original `vaft` (or any other script from the
-TwitchAdSolutions family), make sure to remove it first — this fork resets
-its own version counter, so an old script may end up taking priority over
-this one and silently disable it.
+## Reading the console
+
+Every message is prefixed with `[VAFT]`, so filtering on that in DevTools
+shows exactly what the script is doing. The lines worth knowing:
+
+| Line | Meaning |
+| --- | --- |
+| `Blocking…` / `Finished blocking ads` | An ad break was detected and handled. |
+| `ModifiedM3U8 swap …` | The playlist was swapped for an ad-free one. |
+| `Reloading Twitch player` | A player reload was triggered. |
+| `Attempt to fix buffering position:` | `PlayerBufferingFix` stepped in. |
+| `Replaced 'site' player type with 'popout' player type` | `ForceAccessTokenPlayerType` rewrote the token request. |
+| `hookWorkerFetch` | Printed from inside each Twitch worker. More than one is normal. |
+| `Twitch worker #N created in top frame` | Twitch creates one worker per player instance; a second one at startup is the mini player above chat, and every player reload adds another. |
+| `Denied picture-by-picture access token locally` | The mini player above chat is being suppressed. |
+| `skipping vaft in nested frame` | The script stayed out of one of Twitch's hidden iframes. |
+| `skipping vaft as there's another script active` | Another TwitchAdSolutions script is installed — remove it. |
+| `Ads will leak due to missing resolution info for …` | No ad-free variant could be matched for that resolution. |
+| `setQualitySettings failed` / `localStorageHooks failed` | `localStorage` was not writable; `PreventAutoDownscale` and the quality/volume preservation are degraded. |
+| `Could not find player` / `player state` / `react root` | Twitch changed its internals — likely the script needs an update. |
+
+When opening an issue, this output is what makes a report actionable. Please
+do not attach HAR files or `chrome://net-export` captures: they contain your
+session tokens.
 
 ## Known issues (inherited from upstream)
 
 - Freezing / buffering / repeating segments around ad transitions — see the
-  `PlayerBuffering*` options in `vaft.user.js`
+  `PlayerBuffering*` options
   ([#1](https://github.com/scamorza/TwitchAdBlock/issues/1)).
 - Streams can appear "offline" during ad breaks
   ([#2](https://github.com/scamorza/TwitchAdBlock/issues/2)).
@@ -59,6 +120,14 @@ this one and silently disable it.
 
 Twitch periodically changes its player and internal APIs, which breaks
 scripts like this one — expect ongoing maintenance, not a one-time fix.
+
+## Credits and licence
+
+Thanks to [pixeltris](https://github.com/pixeltris) for `vaft` and for every
+other tool in the original repository, and to
+[CommanderRoot](https://github.com/CommanderRoot) for the automatic downscale
+script that `PreventAutoDownscale` is based on. MIT licensed, see
+[`LICENSE`](LICENSE).
 
 ## Disclaimer
 
