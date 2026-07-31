@@ -55,7 +55,7 @@ installed script in your userscript manager.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `PreventAutoDownscale` | `true` | Forces Source/1080p60 and stops Twitch from downscaling a backgrounded tab. See below. |
+| `PreventAutoDownscale` | `true` | Asks Twitch for the highest available quality and stops it downscaling a backgrounded tab. See below. |
 | `IsAdStrippingEnabled` | `true` | Strip ad segments when no clean stream could be obtained. |
 | `ReloadPlayerAfterAd` | `true` | Reload the player when the break ends instead of pause/play. |
 | `AlwaysReloadPlayerOnAd` | `false` | Pause/play on both entering and leaving a break. |
@@ -73,13 +73,18 @@ Each one is documented inline in the script.
 
 ### PreventAutoDownscale
 
-Ported from CommanderRoot's "Disable automatic video downscale". It pins
-quality to Source/1080p60, blocks the visibility events Twitch uses to
-downscale a backgrounded tab, and fakes `document.hasFocus()` as always
-`true` — the same check Twitch uses to decide whether you are actively
+Ported from CommanderRoot's "Disable automatic video downscale". It asks
+Twitch for the highest available quality, blocks the visibility events Twitch
+uses to downscale a backgrounded tab, and fakes `document.hasFocus()` as
+always `true` — the same check Twitch uses to decide whether you are actively
 watching. A side effect is that Drops keep progressing with the tab in the
 background and the audio muted. Set it to `false` to keep only the ad
 blocking behaviour.
+
+The quality comes from Twitch's own `video-quality-highest-available` setting,
+so it follows whatever the channel offers rather than a fixed resolution. On a
+2k/4k channel that is the HEVC variant, which is also what triggers the player
+reload at ad breaks — see `SkipPlayerReloadOnHevc` if that causes trouble.
 
 ## Reading the console
 
