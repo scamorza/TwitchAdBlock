@@ -67,9 +67,13 @@ installed script in your userscript manager.
 
 Buffering behaviour can be tuned further with `PlayerBufferingDelay`,
 `PlayerBufferingSameStateCount`, `PlayerBufferingMinRepeatDelay`,
-`PlayerBufferingDangerZone`, `PlayerBufferingDoPlayerReload` and
-`PlayerBufferingPrerollCheckEnabled` / `PlayerBufferingPrerollCheckOffset`.
-Each one is documented inline in the script.
+`PlayerBufferingDangerZone`, `PlayerBufferingDoPlayerReload`,
+`PlayerBufferingPrerollCheckEnabled` / `PlayerBufferingPrerollCheckOffset`,
+and — for when the mitigation turns out to be achieving nothing —
+`PlayerBufferingEscalateAfter`, `PlayerBufferingMaxIneffectiveAttempts` and
+`PlayerBufferingIneffectiveBackoff`. Recovering a player left paused by our own
+pause/play is controlled by `PlayerResumeVerify` and its `Delay`, `Attempts` and
+`MaxWaits` counterparts. Each one is documented inline in the script.
 
 ### PreventAutoDownscale
 
@@ -94,9 +98,11 @@ shows exactly what the script is doing. The lines worth knowing:
 | Line | Meaning |
 | --- | --- |
 | `Blocking…` / `Finished blocking ads` | An ad break was detected and handled. |
-| `ModifiedM3U8 swap …` | The playlist was swapped for an ad-free one. |
+| `ModifiedM3U8 fallback now in use …` | On a 2k/4k channel, the HEVC variant was swapped for a non-HEVC one so the player can be reloaded during the break. |
 | `Reloading Twitch player` | A player reload was triggered. |
 | `Attempt to fix buffering position:` | `PlayerBufferingFix` stepped in. |
+| `Player state unchanged after … backing off` | The mitigation had no effect at all, so it stops retrying every few seconds and drops to one reload per minute. |
+| `Player still paused after our own resume` | A pause/play or reload left the player paused and the script is getting it going again. |
 | `Replaced 'site' player type with 'popout' player type` | `ForceAccessTokenPlayerType` rewrote the token request. |
 | `hookWorkerFetch` | Printed from inside each Twitch worker. More than one is normal. |
 | `Twitch worker #N created in top frame` | Twitch creates one worker per player instance; a second one at startup is the mini player above chat, and every player reload adds another. |
