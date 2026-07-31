@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      1.3.1
+// @version      1.3.2
 // @description  Twitch ad blocking (vaft), forked from TwitchAdSolutions
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -73,10 +73,11 @@
         scope.PlayerBufferingEscalateAfter = 2;// Consecutive attempts leaving the player state completely untouched before escalating from pause/play to a player reload
         scope.PlayerBufferingMaxIneffectiveAttempts = 4;// Consecutive attempts leaving the player state completely untouched before backing off. The player can wedge below the level pause/play reaches (dead stream, torn down worker), where retrying every ~10s achieves nothing
         scope.PlayerBufferingIneffectiveBackoff = 60000;// While backed off, how long (in milliseconds) between reload attempts. Recovery is still possible (the network may come back), it just stops spamming
-        scope.PlayerResumeVerify = true;// After vaft pauses or reloads the player, check that it actually came back. A play() that doesn't take used to strand the player paused for good: the buffering monitor skips paused players, and the only auto-resume on tab refocus requires the video to be muted
+        scope.PlayerResumeVerify = true;// After vaft pauses or reloads the player, check that it actually came back. A play() that doesn't take used to strand the player paused for good, since the buffering monitor skips paused players and ResumeOnTabFocus only fires when the tab comes back
         scope.PlayerResumeVerifyDelay = 2000;// How long (in milliseconds) to wait before checking the player resumed. Deliberately short, so a pause the user made themselves is never mistaken for a failed resume
         scope.PlayerResumeVerifyAttempts = 2;// How many extra play() calls to try before forcing a player reload
         scope.PlayerResumeVerifyMaxWaits = 5;// How many checks to let pass while the player is still buffering. A player that is loading is working on it, not stranded, and a reload looks exactly like this while it starts up
+        scope.ResumeOnTabFocus = true;// Resume the player when the tab comes back, as long as it was playing when the tab was hidden. Upstream did this only for a muted video on Chrome, which skipped the case that strands the stream: the tab comes back, the video is paused and audible, and nothing in the script resumes it
         scope.V2API = false;
         scope.IsAdStrippingEnabled = true;
         scope.AdSegmentCache = new Map();
@@ -926,8 +927,8 @@
         escalated: false
     };
     // A play() that doesn't take leaves the player paused, and nothing else in the script can
-    // recover it: the buffering monitor skips paused players and the refocus handler only
-    // resumes muted ones. Check shortly after our own resume, so a pause the user made
+    // recover it while the tab is in front: the buffering monitor skips paused players and
+    // ResumeOnTabFocus only fires on the way back. Check shortly after our own resume, so a pause
     // themselves (which would come later) is never mistaken for one of ours
     function verifyPlayerResumed() {
         if (!PlayerResumeVerify) {
@@ -1200,7 +1201,6 @@
         const initialHidden = hidden ? hidden.apply(document) === true : false;
         let didInitialPlay = false;
         const visibilityChange = e => {
-            const isChrome = typeof chrome !== 'undefined';
             const videos = document.getElementsByTagName('video');
             const isHidden = (hidden && hidden.apply(document) === true) || (webkitHidden && webkitHidden.apply(document) === true);
             if (videos.length > 0) {
@@ -1211,8 +1211,13 @@
                         //console.log('Tab focused. Stream should be active');
                         playerBufferState.hasStreamStarted = true;
                     }
-                    if (isChrome && wasVideoPlaying && !videos[0].ended && videos[0].paused && videos[0].muted) {
-                        videos[0].play();
+                    // It was playing when the tab went away, so this pause isn't one the user made.
+                    // Upstream also required the video to be muted and the browser to be Chrome,
+                    // which left out the case that strands the stream: nothing else in the script
+                    // recovers a paused player, so the stream just sits there until you press play
+                    if (ResumeOnTabFocus && wasVideoPlaying && !videos[0].ended && videos[0].paused) {
+                        console.log('[VAFT] Tab focused with the video paused, resuming (muted:' + videos[0].muted + ')');
+                        playPlayer(videos[0], 'tab focus');
                     }
                 }
             }

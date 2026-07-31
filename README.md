@@ -73,7 +73,8 @@ and — for when the mitigation turns out to be achieving nothing —
 `PlayerBufferingEscalateAfter`, `PlayerBufferingMaxIneffectiveAttempts` and
 `PlayerBufferingIneffectiveBackoff`. Recovering a player left paused by our own
 pause/play is controlled by `PlayerResumeVerify` and its `Delay`, `Attempts` and
-`MaxWaits` counterparts. Each one is documented inline in the script.
+`MaxWaits` counterparts, and `ResumeOnTabFocus` covers a player found paused
+when you come back to the tab. Each one is documented inline in the script.
 
 ### PreventAutoDownscale (background video quality)
 
@@ -111,7 +112,8 @@ shows exactly what the script is doing. The lines worth knowing:
 | `Attempt to fix buffering position:` | `PlayerBufferingFix` stepped in. |
 | `Player state unchanged after … backing off` | The mitigation had no effect at all, so it stops retrying every few seconds and drops to one reload per minute. |
 | `Player still paused after our own resume` | A pause/play or reload left the player paused and the script is getting it going again. |
-| `play() rejected after …` | The browser refused to resume playback. `NotAllowedError` means its autoplay policy blocked it, usually on a backgrounded tab. |
+| `Tab focused with the video paused, resuming` | You came back to the tab and the player was sitting paused, usually because it was still starting up — after a page load or the reload at the end of an ad break. |
+| `play() rejected after …` | The resume did not complete. `AbortError` is the player taking over and finishing the job itself, which is normal here; `NotAllowedError` would mean the browser's autoplay policy blocked it. |
 | `Replaced 'site' player type with 'popout' player type` | `ForceAccessTokenPlayerType` rewrote the token request. |
 | `hookWorkerFetch` | Printed from inside each Twitch worker. More than one is normal. |
 | `Twitch worker #N created in top frame` | Twitch creates one worker per player instance; a second one at startup is the mini player above chat, and every player reload adds another. |
