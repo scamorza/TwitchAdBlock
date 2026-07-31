@@ -111,10 +111,11 @@ shows exactly what the script is doing. The lines worth knowing:
 | `Attempt to fix buffering position:` | `PlayerBufferingFix` stepped in. |
 | `Player state unchanged after … backing off` | The mitigation had no effect at all, so it stops retrying every few seconds and drops to one reload per minute. |
 | `Player still paused after our own resume` | A pause/play or reload left the player paused and the script is getting it going again. |
+| `play() rejected after …` | The browser refused to resume playback. `NotAllowedError` means its autoplay policy blocked it, usually on a backgrounded tab. |
 | `Replaced 'site' player type with 'popout' player type` | `ForceAccessTokenPlayerType` rewrote the token request. |
 | `hookWorkerFetch` | Printed from inside each Twitch worker. More than one is normal. |
 | `Twitch worker #N created in top frame` | Twitch creates one worker per player instance; a second one at startup is the mini player above chat, and every player reload adds another. |
-| `Denied picture-by-picture access token locally` | The mini player above chat is being suppressed. |
+| `Denied picture-by-picture access token locally for …` | The mini player in the chat column is being suppressed. Twitch asks for this token roughly every 8 minutes whether it is granted or not, so the line repeating is normal. |
 | `skipping vaft in nested frame` | The script stayed out of one of Twitch's hidden iframes. |
 | `skipping vaft as there's another script active` | Another TwitchAdSolutions script is installed — remove it. |
 | `Ads will leak due to missing resolution info for …` | No ad-free variant could be matched for that resolution. |
