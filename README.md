@@ -75,20 +75,28 @@ and — for when the mitigation turns out to be achieving nothing —
 pause/play is controlled by `PlayerResumeVerify` and its `Delay`, `Attempts` and
 `MaxWaits` counterparts. Each one is documented inline in the script.
 
-### PreventAutoDownscale
+### PreventAutoDownscale (background video quality)
 
-Ported from CommanderRoot's "Disable automatic video downscale". It asks
-Twitch for the highest available quality, blocks the visibility events Twitch
-uses to downscale a backgrounded tab, and fakes `document.hasFocus()` as
-always `true` — the same check Twitch uses to decide whether you are actively
-watching. A side effect is that Drops keep progressing with the tab in the
-background and the audio muted. Set it to `false` to keep only the ad
-blocking behaviour.
+Twitch lowers the stream quality when it decides you are not actively
+watching, and switching to another tab is enough: the stream drops to 360p
+until you come back. It reaches that conclusion two ways — page visibility,
+and `document.hasFocus()`.
 
-The quality comes from Twitch's own `video-quality-highest-available` setting,
-so it follows whatever the channel offers rather than a fixed resolution. On a
-2k/4k channel that is the HEVC variant, which is also what triggers the player
-reload at ad breaks — see `SkipPlayerReloadOnHevc` if that causes trouble.
+`vaft` has always hidden page visibility from Twitch. `PreventAutoDownscale`,
+ported from CommanderRoot's "Disable automatic video downscale", covers the
+rest: it answers `hasFocus()` as always `true` and turns on Twitch's own
+`video-quality-highest-available` setting, so the quality follows whatever the
+channel offers rather than a fixed resolution. A side effect is that Drops
+keep progressing with the tab in the background and the audio muted.
+
+On a 2k/4k channel the highest variant is the HEVC one, which is also what
+triggers the player reload at ad breaks — see `SkipPlayerReloadOnHevc` if that
+causes trouble.
+
+Setting the option to `false` restores the real `hasFocus()` and leaves only
+the ad blocking behaviour. It does not restore page visibility: `vaft` hides
+that from everything running on the page, so extensions that react to it —
+BetterTTV's "Mute Invisible Player", for one — stay inert either way.
 
 ## Reading the console
 
