@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      1.3.0
+// @version      1.3.1
 // @description  Twitch ad blocking (vaft), forked from TwitchAdSolutions
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -910,6 +910,15 @@
             state: playerState
         };
     }
+    // play() hands back the video element's promise, and we used to drop it. A rejection is the
+    // difference between the browser refusing the call (NotAllowedError, the autoplay policy on a
+    // backgrounded tab) and the call going through while the player stays paused anyway, which is
+    // exactly what we can't tell apart today
+    function playPlayer(player, context) {
+        const result = player.play();
+        result?.catch?.((err) => console.log('[VAFT] play() rejected after ' + context + ': ' + (err?.name || err)));
+        return result;
+    }
     const playerResumeState = {
         timer: null,
         attempts: 0,
@@ -946,7 +955,7 @@
                 if (playerResumeState.attempts < PlayerResumeVerifyAttempts) {
                     playerResumeState.attempts++;
                     console.log('[VAFT] Player still paused after our own resume, retrying play (' + playerResumeState.attempts + '/' + PlayerResumeVerifyAttempts + ')');
-                    player.play();
+                    playPlayer(player, 'resume retry');
                     verifyPlayerResumed();
                 } else if (!playerResumeState.escalated) {
                     // Only once, otherwise the reload's own play() would restart this cycle
@@ -984,7 +993,7 @@
         playerBufferState.numSame = 0;
         if (isPausePlay) {
             player.pause();
-            player.play();
+            playPlayer(player, 'pause/play');
             verifyPlayerResumed();
             return;
         }
@@ -1010,7 +1019,7 @@
             console.log('[VAFT] Reloading Twitch player');
             playerState.setSrc({ isNewMediaPlayerInstance: true, refreshAccessToken: true });
             postTwitchWorkerMessage('TriggeredPlayerReload');
-            player.play();
+            playPlayer(player, 'reload');
             verifyPlayerResumed();
             if (localStorageHookFailed && (currentQualityLS || currentMutedLS || currentVolumeLS)) {
                 setTimeout(() => {
@@ -1087,10 +1096,13 @@
                     // the server to reject; Twitch creates the player's worker either way. Keep above the
                     // ForceAccessTokenPlayerType block, which would rewrite this request's playerType
                     if (init && typeof init.body === 'string' && init.body.includes('PlaybackAccessToken') && init.body.includes('picture-by-picture')) {
-                        // Shaped like a real GQL failure. Generic message, the client may report it back
+                        // A null token with no errors array is still a complete GQL response, and the mini
+                        // player has nothing to start from either way. The errors array was reaching
+                        // Twitch's Apollo client, which reported our own denial back to the user as a
+                        // console error, and a failure shaped like that is also the kind Twitch retries
+                        // (#3). Put errors: [{message: 'forbidden'}] back if the mini player returns
                         const deniedToken = () => ({
-                            data: {streamPlaybackAccessToken: null, videoPlaybackAccessToken: null},
-                            errors: [{message: 'forbidden'}]
+                            data: {streamPlaybackAccessToken: null, videoPlaybackAccessToken: null}
                         });
                         // Sending the empty body used to get back a 400 'unable to read request body'. A 200
                         // is less likely to be retried, but that 400 is the fallback if the mini player returns
@@ -1100,23 +1112,31 @@
                         }));
                         const isPictureByPicture = (operation) => typeof operation?.variables?.playerType === 'string'
                             && operation.variables.playerType.includes('picture-by-picture');
+                        // Which channel the mini player is asking for. A login we aren't watching means
+                        // Twitch is rotating a recommendation preview rather than retrying our denial (#3)
+                        const deniedFor = (operation) => operation?.variables?.login || operation?.variables?.vodID || 'unknown';
                         try {
                             const operations = JSON.parse(init.body);
                             if (!Array.isArray(operations)) {
                                 if (isPictureByPicture(operations)) {
-                                    console.log('[VAFT] Denied picture-by-picture access token locally');
+                                    console.log('[VAFT] Denied picture-by-picture access token locally for ' + deniedFor(operations));
                                     return jsonResponse(deniedToken());
                                 }
                             } else if (operations.length > 0 && operations.every(isPictureByPicture)) {
-                                console.log('[VAFT] Denied picture-by-picture access token batch locally');
+                                console.log('[VAFT] Denied picture-by-picture access token batch locally for ' + operations.map(deniedFor).join(', '));
                                 return jsonResponse(operations.map(() => deniedToken()));
                             } else if (operations.some(isPictureByPicture)) {
                                 // Responses are matched by position, so denying one entry of a batch means
-                                // splicing it back at its index. Twitch doesn't batch this one, so don't bother
-                                init.body = '';
+                                // splicing it back at its index. Emptying the body instead took the real
+                                // player's token down with it, which is far worse than the mini player
+                                // showing up. Twitch doesn't batch this one; the log is here to tell us
+                                // if that ever changes
+                                console.log('[VAFT] picture-by-picture batched with other operations, letting it through');
                             }
                         } catch {
-                            init.body = '';// Unparseable, let the server reject it as before
+                            // String-matched but unreadable, so we don't know what else the body carries.
+                            // Same reasoning: leaving it alone is the direction that fails safe
+                            console.log('[VAFT] Could not read a picture-by-picture token request, letting it through');
                         }
                     }
                     if (ForceAccessTokenPlayerType && typeof init.body === 'string' && init.body.includes('PlaybackAccessToken')) {
