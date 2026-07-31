@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      1.2.2
+// @version      1.3.0
 // @description  Twitch ad blocking (vaft), forked from TwitchAdSolutions
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -70,11 +70,18 @@
         scope.PlayerBufferingMinRepeatDelay = 8000;// Minimum delay (in milliseconds) between each pause/play (this is to avoid over pressing pause/play when there are genuine buffering problems)
         scope.PlayerBufferingPrerollCheckEnabled = false;// Enable this if you're getting an immediate pause/play/reload as you open a stream (which is causing the stream to take longer to load). One problem with this being true is that it can cause the player to get stuck in some instances requiring the user to press pause/play
         scope.PlayerBufferingPrerollCheckOffset = 5;// How far the stream need to move before doing the buffering mitigation (depends on PlayerBufferingPrerollCheckEnabled being true)
+        scope.PlayerBufferingEscalateAfter = 2;// Consecutive attempts leaving the player state completely untouched before escalating from pause/play to a player reload
+        scope.PlayerBufferingMaxIneffectiveAttempts = 4;// Consecutive attempts leaving the player state completely untouched before backing off. The player can wedge below the level pause/play reaches (dead stream, torn down worker), where retrying every ~10s achieves nothing
+        scope.PlayerBufferingIneffectiveBackoff = 60000;// While backed off, how long (in milliseconds) between reload attempts. Recovery is still possible (the network may come back), it just stops spamming
+        scope.PlayerResumeVerify = true;// After vaft pauses or reloads the player, check that it actually came back. A play() that doesn't take used to strand the player paused for good: the buffering monitor skips paused players, and the only auto-resume on tab refocus requires the video to be muted
+        scope.PlayerResumeVerifyDelay = 2000;// How long (in milliseconds) to wait before checking the player resumed. Deliberately short, so a pause the user made themselves is never mistaken for a failed resume
+        scope.PlayerResumeVerifyAttempts = 2;// How many extra play() calls to try before forcing a player reload
+        scope.PlayerResumeVerifyMaxWaits = 5;// How many checks to let pass while the player is still buffering. A player that is loading is working on it, not stranded, and a reload looks exactly like this while it starts up
         scope.V2API = false;
         scope.IsAdStrippingEnabled = true;
         scope.AdSegmentCache = new Map();
         scope.AllSegmentsAreAdSegments = false;
-        scope.PreventAutoDownscale = true;// Forces "Source"/1080p60 quality and stops Twitch from downscaling/detecting focus loss while the tab is backgrounded (ported from CommanderRoot's "Disable automatic video downscale" script). Set to false to disable and keep only vaft's own ad blocking behavior.
+        scope.PreventAutoDownscale = true;// Asks Twitch for the highest available quality and stops it detecting focus loss while the tab is backgrounded (ported from CommanderRoot's "Disable automatic video downscale" script). On 2k/4k channels the top variant is the HEVC one, so this also makes the player reload at ad breaks more likely. Set to false to disable and keep only vaft's own ad blocking behavior.
     }
     let isActivelyStrippingAds = false;
     let localStorageHookFailed = false;
@@ -321,6 +328,7 @@
                                         LastPlayerReload: 0,
                                         EncodingsM3U8: encodingsM3u8,
                                         ModifiedM3U8: null,
+                                        ModifiedM3U8Swaps: [],// Described here, reported only if the fallback is ever put in use
                                         IsUsingModifiedM3U8: false,
                                         UsherParams: (new URL(url)).search,
                                         RequestedAds: new Set(),
@@ -360,13 +368,23 @@
                                                     if (resSettings[codecsKey].startsWith('hev') || resSettings[codecsKey].startsWith('hvc')) {
                                                         const oldResolution = resSettings['RESOLUTION'];
                                                         const [targetWidth, targetHeight] = oldResolution.split('x').map(Number);
+                                                        const targetFrameRate = Number(resSettings['FRAME-RATE']) || 0;
                                                         const newResolutionInfo = nonHevcResolutionList.sort((a, b) => {
-                                                            // TODO: Take into account 'Frame-Rate' when sorting (i.e. 1080p60 vs 1080p30)
                                                             const [streamWidthA, streamHeightA] = a.Resolution.split('x').map(Number);
                                                             const [streamWidthB, streamHeightB] = b.Resolution.split('x').map(Number);
-                                                            return Math.abs((streamWidthA * streamHeightA) - (targetWidth * targetHeight)) - Math.abs((streamWidthB * streamHeightB) - (targetWidth * targetHeight));
+                                                            const areaDiff = Math.abs((streamWidthA * streamHeightA) - (targetWidth * targetHeight)) - Math.abs((streamWidthB * streamHeightB) - (targetWidth * targetHeight));
+                                                            if (areaDiff !== 0) {
+                                                                return areaDiff;
+                                                            }
+                                                            // Same pixel count (720p60 vs 720p30). Whichever came first in the playlist used to
+                                                            // win, and the rewritten line keeps advertising the original FRAME-RATE, so a drop
+                                                            // here is invisible to both the player and the quality menu
+                                                            return Math.abs((Number(a.FrameRate) || 0) - targetFrameRate) - Math.abs((Number(b.FrameRate) || 0) - targetFrameRate);
                                                         })[0];
-                                                        console.log('[VAFT] ModifiedM3U8 swap ' + resSettings[codecsKey] + ' to ' + newResolutionInfo.Codecs + ' oldRes:' + oldResolution + ' newRes:' + newResolutionInfo.Resolution);
+                                                        // Recorded, not logged: this playlist is only served once IsUsingModifiedM3U8 is
+                                                        // set at the start of an ad, and it may never be. Logging here fired on every page
+                                                        // load, once per HEVC variant, and read as though the quality had already dropped
+                                                        streamInfo.ModifiedM3U8Swaps.push(resSettings[codecsKey] + ' to ' + newResolutionInfo.Codecs + ' oldRes:' + oldResolution + '@' + targetFrameRate + ' newRes:' + newResolutionInfo.Resolution + '@' + (newResolutionInfo.FrameRate || 0));
                                                         lines[i] = lines[i].replace(/CODECS="[^"]+"/, `CODECS="${newResolutionInfo.Codecs}"`);
                                                         lines[i + 1] = newResolutionInfo.Url + ' '.repeat(i + 1);// The stream doesn't load unless each url line is unique
                                                     }
@@ -527,6 +545,7 @@
             const isHevc = currentResolution.Codecs.startsWith('hev') || currentResolution.Codecs.startsWith('hvc');
             if (((isHevc && !SkipPlayerReloadOnHevc) || AlwaysReloadPlayerOnAd) && streamInfo.ModifiedM3U8 && !streamInfo.IsUsingModifiedM3U8) {
                 streamInfo.IsUsingModifiedM3U8 = true;
+                console.log('[VAFT] ModifiedM3U8 fallback now in use, was on ' + currentResolution.Codecs + ' ' + currentResolution.Resolution + '@' + (currentResolution.FrameRate || 0) + (streamInfo.ModifiedM3U8Swaps?.length ? ' | ' + streamInfo.ModifiedM3U8Swaps.join(' | ') : ''));
                 streamInfo.LastPlayerReload = Date.now();
                 postMessage({
                     key: 'ReloadPlayer'
@@ -721,6 +740,9 @@
         bufferDuration: 0,
         numSame: 0,
         lastFixTime: 0,
+        lastAttemptSignature: null,
+        ineffectiveAttempts: 0,
+        isBackingOff: false,
         isLive: true
     };
     function monitorPlayerBuffering() {
@@ -740,6 +762,9 @@
                               playerBufferState.channelName = channelName;
                               playerBufferState.hasStreamStarted = false;
                               playerBufferState.numSame = 0;
+                              playerBufferState.lastAttemptSignature = null;
+                              playerBufferState.ineffectiveAttempts = 0;
+                              playerBufferState.isBackingOff = false;
                               //console.log('Channel changed to ' + channelName);
                           }
                       }
@@ -762,12 +787,31 @@
                         ) {
                             playerBufferState.numSame++;
                             if (playerBufferState.numSame == PlayerBufferingSameStateCount) {
-                                console.log('[VAFT] Attempt to fix buffering position:' + playerBufferState.position + ' bufferedPosition:' + playerBufferState.bufferedPosition + ' bufferDuration:' + playerBufferState.bufferDuration);
-                                const isPausePlay = !PlayerBufferingDoPlayerReload;
-                                const isReload = PlayerBufferingDoPlayerReload;
-                                doTwitchPlayerTask(isPausePlay, isReload);
-                                playerBufferState.lastFixTime = Date.now();
                                 playerBufferState.numSame = 0;
+                                // An attempt that leaves all three values bit for bit identical did nothing at all.
+                                // Count those: a wedged player never recovers from pause/play, and without this the
+                                // mitigation repeats every ~10s indefinitely while achieving nothing
+                                const stateSignature = position + '|' + bufferedPosition + '|' + bufferDuration;
+                                if (stateSignature !== playerBufferState.lastAttemptSignature) {
+                                    playerBufferState.lastAttemptSignature = stateSignature;
+                                    playerBufferState.ineffectiveAttempts = 0;
+                                    playerBufferState.isBackingOff = false;
+                                }
+                                const ineffective = playerBufferState.ineffectiveAttempts;
+                                const shouldBackOff = ineffective >= PlayerBufferingMaxIneffectiveAttempts;
+                                if (shouldBackOff && !playerBufferState.isBackingOff) {
+                                    playerBufferState.isBackingOff = true;
+                                    console.log('[VAFT] Player state unchanged after ' + ineffective + ' attempts, backing off to one reload every ' + (PlayerBufferingIneffectiveBackoff / 1000) + 's');
+                                }
+                                if (!shouldBackOff || playerBufferState.lastFixTime <= Date.now() - PlayerBufferingIneffectiveBackoff) {
+                                    const isReload = PlayerBufferingDoPlayerReload || ineffective >= PlayerBufferingEscalateAfter;
+                                    if (!shouldBackOff) {
+                                        console.log('[VAFT] Attempt to fix buffering position:' + position + ' bufferedPosition:' + bufferedPosition + ' bufferDuration:' + bufferDuration + ' state:' + player.core?.state?.state + (isReload ? ' (reload)' : ''));
+                                    }
+                                    doTwitchPlayerTask(!isReload, isReload);
+                                    playerBufferState.lastFixTime = Date.now();
+                                    playerBufferState.ineffectiveAttempts++;
+                                }
                             }
                         } else {
                             playerBufferState.numSame = 0;
@@ -866,7 +910,56 @@
             state: playerState
         };
     }
-    function doTwitchPlayerTask(isPausePlay, isReload) {
+    const playerResumeState = {
+        timer: null,
+        attempts: 0,
+        waits: 0,
+        escalated: false
+    };
+    // A play() that doesn't take leaves the player paused, and nothing else in the script can
+    // recover it: the buffering monitor skips paused players and the refocus handler only
+    // resumes muted ones. Check shortly after our own resume, so a pause the user made
+    // themselves (which would come later) is never mistaken for one of ours
+    function verifyPlayerResumed() {
+        if (!PlayerResumeVerify) {
+            return;
+        }
+        clearTimeout(playerResumeState.timer);
+        playerResumeState.timer = setTimeout(() => {
+            try {
+                const player = getPlayerAndState()?.player;
+                if (!player?.core || (!player.isPaused() && !player.core?.paused)) {
+                    // Gone, or playing again
+                    playerResumeState.attempts = 0;
+                    playerResumeState.waits = 0;
+                    playerResumeState.escalated = false;
+                    return;
+                }
+                // A player that is still buffering is working on it, not stranded, and a reload
+                // looks exactly like this while the new instance starts up. Keep watching rather
+                // than calling play() over it or aborting the load with another reload
+                if (player.core?.state?.state === 'Buffering' && playerResumeState.waits < PlayerResumeVerifyMaxWaits) {
+                    playerResumeState.waits++;
+                    verifyPlayerResumed();
+                    return;
+                }
+                if (playerResumeState.attempts < PlayerResumeVerifyAttempts) {
+                    playerResumeState.attempts++;
+                    console.log('[VAFT] Player still paused after our own resume, retrying play (' + playerResumeState.attempts + '/' + PlayerResumeVerifyAttempts + ')');
+                    player.play();
+                    verifyPlayerResumed();
+                } else if (!playerResumeState.escalated) {
+                    // Only once, otherwise the reload's own play() would restart this cycle
+                    playerResumeState.escalated = true;
+                    console.log('[VAFT] Player still paused after ' + playerResumeState.attempts + ' retries, forcing a reload');
+                    doTwitchPlayerTask(false, true, true);
+                }
+            } catch (err) {
+                console.error('[VAFT] error when verifying the player resumed: ' + err);
+            }
+        }, PlayerResumeVerifyDelay);
+    }
+    function doTwitchPlayerTask(isPausePlay, isReload, ignorePaused) {
         const playerAndState = getPlayerAndState();
         if (!playerAndState) {
             console.log('[VAFT] Could not find react root');
@@ -882,7 +975,9 @@
             console.log('[VAFT] Could not find player state');
             return;
         }
-        if (player.isPaused() || player.core?.paused) {
+        // ignorePaused is for our own resume recovery, which exists precisely to act on a
+        // paused player. Everywhere else this guard keeps us off a pause the user made
+        if (!ignorePaused && (player.isPaused() || player.core?.paused)) {
             return;
         }
         playerBufferState.lastFixTime = Date.now();
@@ -890,6 +985,7 @@
         if (isPausePlay) {
             player.pause();
             player.play();
+            verifyPlayerResumed();
             return;
         }
         if (isReload) {
@@ -915,6 +1011,7 @@
             playerState.setSrc({ isNewMediaPlayerInstance: true, refreshAccessToken: true });
             postTwitchWorkerMessage('TriggeredPlayerReload');
             player.play();
+            verifyPlayerResumed();
             if (localStorageHookFailed && (currentQualityLS || currentMutedLS || currentVolumeLS)) {
                 setTimeout(() => {
                     try {
@@ -1167,8 +1264,12 @@
     function setQualitySettings() {
         try {
             localStorage.setItem('s-qs-ts', Date.now());
-            localStorage.setItem('quality-bitrate', '9840720');
-            localStorage.setItem('video-quality', '{"default":"1080p60"}');
+            // Twitch's own flag for "always take the top variant". It overrides video-quality, so
+            // there is no per-channel label to work out and nothing to write at the wrong moment
+            localStorage.setItem('video-quality-highest-available', 'true');
+            // video-quality and quality-bitrate are both left alone. Twitch maintains them to match
+            // the quality actually in use, and video-quality also holds the user's own choice for
+            // if they ever turn this option off
         } catch (err) {
             console.log('[VAFT] setQualitySettings failed ' + err);
         }
