@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      2.0.0
+// @version      2.0.1
 // @description  Twitch ad blocking
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -56,9 +56,14 @@
         // -- ad blocking ---------------------------------------------------------------------
         BlockAds: true,
         AdSignifier: 'stitched',
-        // In order. embed/popout give the full ladder; autoplay is capped ~360p but most likely clean.
-        BackupPlayerTypes: ['embed', 'popout', 'autoplay'],
-        FallbackPlayerType: 'embed',
+        // In order. Server-side ads are decided on the pair playerType + platform, the only two
+        // client-controlled fields that reach the signed token. mobile_feed asked as android is the
+        // one combination that is both ad-free and uncapped: 1080p on avc, 1440p hev1 on HEVC, so a
+        // break costs no rendition change at all.
+        // popout sits second as the full-quality second chance: each request is its own ad auction
+        // and it comes back clean about four times in ten, which is worth one round-trip on the
+        // rare path where mobile_feed fails. autoplay is last and ad-free too, but capped at 640x360.
+        BackupPlayerTypes: ['mobile_feed', 'popout', 'autoplay'],
         // Also strips parent_domains, which is what stops the embed-shaped fake ads.
         ForceAccessTokenPlayerType: 'popout',
         StripAdSegments: true,
@@ -1366,10 +1371,14 @@ var TOKEN_QUERY = 'query PlaybackAccessToken($login: String!, $isLive: Boolean!,
 
 // Twitch's own client sends the full document, not this hash, so the hash is an optimisation we
 // are not entitled to assume keeps working. On the first refusal, switch for the session.
+// Player types that must be asked for as a mobile client. The platform is not cosmetic: the same
+// mobile_feed asked as web comes back stitched every time, so the exemption needs the pair.
+var PLATFORM_MOBILE = { autoplay: 1, mobile_feed: 1 };
+
 function requestAccessToken(channel, playerType) {
     var variables = {
         isLive: true, login: channel, isVod: false, vodID: '',
-        playerType: playerType, platform: playerType === 'autoplay' ? 'android' : 'web'
+        playerType: playerType, platform: PLATFORM_MOBILE[playerType] ? 'android' : 'web'
     };
     var body = { operationName: 'PlaybackAccessToken', variables: variables };
     if (CONFIG.tokenMode === 'persisted') {
