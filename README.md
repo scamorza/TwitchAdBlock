@@ -1,161 +1,150 @@
-# vaft — Twitch ad blocking userscript
+# TwitchAdBlock
 
-A maintained fork of the `vaft` script from
-[pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions),
-kept in userscript form only. It tries to get you a clean stream as fast as it
-can, and strips ad segments from the playlist when it can't.
+A Twitch ad-blocking userscript. It works on two fronts, because Twitch serves ads two different
+ways: it gets you a clean stream when ads are stitched into the playlist, and it stops the browser
+from ever requesting the ads that are decided client-side.
+
+Started as a fork of `vaft` from
+[pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions) and has since been
+rewritten around the same core idea. Little of the original code remains; the idea is still his.
 
 ## Install
 
-1. Install a userscript manager — [Tampermonkey](https://www.tampermonkey.net/)
-   or [Violentmonkey](https://violentmonkey.github.io/).
+1. Install a userscript manager — [Tampermonkey](https://www.tampermonkey.net/) or
+   [Violentmonkey](https://violentmonkey.github.io/).
 2. Open
    [`vaft.user.js`](https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js).
    The manager will prompt you to install it.
 
-Updates are automatic: the script declares `@updateURL`, so the manager pulls
-new versions on its own update schedule.
+Updates are automatic: the script declares `@updateURL`, so the manager pulls new versions on its
+own schedule.
 
-**If you already have another script from the TwitchAdSolutions family,
-remove it first.** This fork resets its own version counter, so an older
-script can take priority and silently disable this one. You will see it in the
-console as `[VAFT] skipping vaft as there's another script active`.
+**If you already have another script from the TwitchAdSolutions family, remove it first.** Two of
+them will both hook `Worker` and `fetch`. They recognise each other and exactly one runs, but which
+one is a race. The console tells you it happened:
+`standing down, <marker> is already set -- another ad blocker got here first`.
 
 ## How it works
 
-Twitch stitches ads into the same HLS playlist as the stream, so there is no
-request to block. `vaft` hooks `window.Worker` and `window.fetch`, then works
-on the playlist itself:
+**Stitched ads** arrive inside the same HLS playlist as the stream, so there is no request to block.
+The script hooks `window.Worker` and `window.fetch` and works on the playlist: when it sees ad
+markers, it requests a playback access token under a different player type and serves that stream
+instead. Player types are tried in order, and within each one every rung of the quality ladder, so a
+break where the top rendition is stitched can still be served from a lower one.
 
-- It requests playback access tokens under a different player type
-  (`ForceAccessTokenPlayerType`, `BackupPlayerTypes`), because those streams
-  frequently come back without ads.
-- If every fallback still contains ads, `IsAdStrippingEnabled` removes the ad
-  segments (`AdSignifier`) from the M3U8 and serves the stream without them.
-- Around the transition it can pause/play or reload the player
-  (`ReloadPlayerAfterAd`, `AlwaysReloadPlayerOnAd`) and mitigate a player that
-  gets stuck buffering (`PlayerBufferingFix`).
+Where no clean stream exists at all — common on channels whose source is HEVC, since the ladder below
+it is AVC and a codec swap stops playback dead — two things happen. The player is stepped down to the
+best rung of a different codec, which turns one candidate into the whole ladder. Until that lands, ad
+segments are answered with an empty body: the playlist keeps its structure, so the player does not
+run out of media and get rendered as offline.
 
-## Why this fork
+**Display ads** — the pod above chat, squeezeback, lower third, pause ads — are decided in the
+browser, so none of the above ever sees them. Twitch's own ad manager holds every ad request in a
+queue and drains it as `declineReason ? decline() : isReady && fn()`, where `fn()` is the fetch to
+the ad exchange. Setting `declineReason` stops the request that would have produced the creative.
+That is upstream of the container, not a hidden overlay, and it uses Twitch's own decline path
+including their flag for not reporting it.
 
-Supporting creators is fair, whether that means watching a few ads or
-subscribing to skip them. It stops being fair when the ad load makes streams
-unwatchable — viewers should be encouraged to support a creator, not worn down
-into subscribing. That is the reason this project is still maintained.
+The **mini player above chat** is refused separately, by denying its access token locally rather than
+sending something the server will reject.
 
-Scope is deliberately narrower than upstream: only `vaft`, only as
-`vaft.user.js`. The uBlock Origin variant and the other tools from the
-original repository (`strip`, `video-swap-new`) are not part of this fork for
-now.
+Blocking ads breaks playback in its own ways, so a fair part of the script exists to put it back
+together: resuming a stream Twitch paused and will not retry, restoring quality after a break,
+reloading a player whose media element was torn down by a decode error.
 
 ## Configuration
 
-All options live in `declareOptions()` at the top of `vaft.user.js`. Edit the
-installed script in your userscript manager.
+Every option, what it does and when touching it is justified: [`doc/config.md`](doc/config.md).
 
-| Option | Default | What it does |
-| --- | --- | --- |
-| `PreventAutoDownscale` | `true` | Asks Twitch for the highest available quality and stops it downscaling a backgrounded tab. See below. |
-| `IsAdStrippingEnabled` | `true` | Strip ad segments when no clean stream could be obtained. |
-| `ReloadPlayerAfterAd` | `true` | Reload the player when the break ends instead of pause/play. |
-| `AlwaysReloadPlayerOnAd` | `false` | Pause/play on both entering and leaving a break. |
-| `SkipPlayerReloadOnHevc` | `false` | Skip the reload on 2k/4k streams. Enable if you get error #4000 / #3000 or a spinning wheel. |
-| `PlayerBufferingFix` | `true` | Detect a player stuck buffering and pause/play it. |
-| `ForceAccessTokenPlayerType` | `'popout'` | Player type sent in the `PlaybackAccessToken` request. |
-| `BackupPlayerTypes` | `embed`, `popout`, `autoplay` | Player types tried, in order, when looking for an ad-free stream. |
-| `FallbackPlayerType` | `'embed'` | Used when every backup type still has ads. |
-
-Buffering behaviour can be tuned further with `PlayerBufferingDelay`,
-`PlayerBufferingSameStateCount`, `PlayerBufferingMinRepeatDelay`,
-`PlayerBufferingDangerZone`, `PlayerBufferingDoPlayerReload`,
-`PlayerBufferingPrerollCheckEnabled` / `PlayerBufferingPrerollCheckOffset`,
-and — for when the mitigation turns out to be achieving nothing —
-`PlayerBufferingEscalateAfter`, `PlayerBufferingMaxIneffectiveAttempts` and
-`PlayerBufferingIneffectiveBackoff`. Recovering a player left paused by our own
-pause/play is controlled by `PlayerResumeVerify` and its `Delay`, `Attempts` and
-`MaxWaits` counterparts, and `ResumeOnTabFocus` covers a player found paused
-when you come back to the tab. Each one is documented inline in the script.
-
-### PreventAutoDownscale (background video quality)
-
-Twitch lowers the stream quality when it decides you are not actively
-watching, and switching to another tab is enough: the stream drops to 360p
-until you come back. It reaches that conclusion two ways — page visibility,
-and `document.hasFocus()`.
-
-`vaft` has always hidden page visibility from Twitch. `PreventAutoDownscale`,
-ported from CommanderRoot's "Disable automatic video downscale", covers the
-rest: it answers `hasFocus()` as always `true` and turns on Twitch's own
-`video-quality-highest-available` setting, so the quality follows whatever the
-channel offers rather than a fixed resolution. A side effect is that Drops
-keep progressing with the tab in the background and the audio muted.
-
-On a 2k/4k channel the highest variant is the HEVC one, which is also what
-triggers the player reload at ad breaks — see `SkipPlayerReloadOnHevc` if that
-causes trouble.
-
-Setting the option to `false` restores the real `hasFocus()` and leaves only
-the ad blocking behaviour. It does not restore page visibility: `vaft` hides
-that from everything running on the page, so extensions that react to it —
-BetterTTV's "Mute Invisible Player", for one — stay inert either way.
+The short version — the defaults are the tested configuration. The two worth knowing are
+`StripAdSegments`, which decides what happens when no clean stream exists, and
+`DeclineClientSideAds`, which is the only thing standing between you and display ads.
 
 ## Reading the console
 
-Every message is prefixed with `[VAFT]`, so filtering on that in DevTools
-shows exactly what the script is doing. The lines worth knowing:
+Everything is prefixed `[VAFT2]`. Filtering on that in DevTools shows what the script is doing.
+Default level is `info`, which is a few lines per break; `window.vaft2.setLogLevel('debug')` opens it
+up. The console entry points are listed on load and documented in
+[`doc/help_info.md`](doc/help_info.md).
 
 | Line | Meaning |
 | --- | --- |
-| `Blocking…` / `Finished blocking ads` | An ad break was detected and handled. |
-| `ModifiedM3U8 fallback now in use …` | On a 2k/4k channel, the HEVC variant was swapped for a non-HEVC one so the player can be reloaded during the break. |
-| `Reloading Twitch player` | A player reload was triggered. |
-| `Attempt to fix buffering position:` | `PlayerBufferingFix` stepped in. |
-| `Player state unchanged after … backing off` | The mitigation had no effect at all, so it stops retrying every few seconds and drops to one reload per minute. |
-| `Player still paused after our own resume` | A pause/play or reload left the player paused and the script is getting it going again. |
-| `Tab focused with the video paused, resuming` | You came back to the tab and the player was sitting paused, usually because it was still starting up — after a page load or the reload at the end of an ad break. |
-| `play() rejected after …` | The resume did not complete. `AbortError` is the player taking over and finishing the job itself, which is normal here; `NotAllowedError` would mean the browser's autoplay policy blocked it. |
-| `Replaced 'site' player type with 'popout' player type` | `ForceAccessTokenPlayerType` rewrote the token request. |
-| `hookWorkerFetch` | Printed from inside each Twitch worker. More than one is normal. |
-| `Twitch worker #N created in top frame` | Twitch creates one worker per player instance; a second one at startup is the mini player above chat, and every player reload adds another. |
-| `Denied picture-by-picture access token locally for …` | The mini player in the chat column is being suppressed. Twitch asks for this token roughly every 8 minutes whether it is granted or not, so the line repeating is normal. |
-| `skipping vaft in nested frame` | The script stayed out of one of Twitch's hidden iframes. |
-| `skipping vaft as there's another script active` | Another TwitchAdSolutions script is installed — remove it. |
-| `Ads will leak due to missing resolution info for …` | No ad-free variant could be matched for that resolution. |
-| `setQualitySettings failed` / `localStorageHooks failed` | `localStorage` was not writable; `PreventAutoDownscale` and the quality/volume preservation are degraded. |
-| `Could not find player` / `player state` / `react root` | Twitch changed its internals — likely the script needs an update. |
+| `v2 active -- <version>` | Loaded, followed by the list of callable entry points. |
+| `client-side ad manager declined at …` | Display ads will not be requested. Its absence means they will. |
+| `ad break started on <channel> -- <quality> <codec>` | A break was detected. The codec is there because it decides which path the break takes. |
+| `serving a clean stream via <type> at <resolution>` | A backup stream was found. The resolution is what is actually being served, not what the player label says. |
+| `backup via <type> had ads at every rendition` | That player type was stitched at every rung; moving to the next. |
+| `stepping down from … to …` | No same-codec backup, so the player was moved to another codec to unlock one. |
+| `ad break finished on <channel>` | Over; quality is handed back on the next line. |
+| `denied a picture-by-picture token locally` | The mini player above chat was refused. |
+| `OVERLAY AD suspected …` | A display ad got through the decline. Worth an issue. |
+| `no clean playlist and stripping is off -- ads will be shown` | Exactly what it says. |
+| `client-side ad manager not found …` | The lookup failed. Display ads are **not** blocked. |
+| `the player is gone -- no media, no buffer …` | A decode error tore the player down; it is being reloaded. |
 
-When opening an issue, this output is what makes a report actionable. Please
-do not attach HAR files or `chrome://net-export` captures: they contain your
-session tokens.
+`window.vaft2.status()` prints the whole state, which is more useful than any single line.
 
-## Known issues (inherited from upstream)
+When opening an issue this output is what makes a report actionable. Please do not attach HAR files
+or `chrome://net-export` captures: they contain your session tokens.
 
-- Freezing / buffering / repeating segments around ad transitions — see the
-  `PlayerBuffering*` options
-  ([#1](https://github.com/scamorza/TwitchAdBlock/issues/1)).
-- Streams can appear "offline" during ad breaks
-  ([#2](https://github.com/scamorza/TwitchAdBlock/issues/2)).
-- No mobile (`m.twitch.tv`) support — out of scope for this fork, so there is
-  no issue tracking it.
+## Known issues
+
+Both are closed on the tracker — known limitations rather than open work. Detail and current
+status in [`doc/issue.md`](doc/issue.md).
+
+- Freezing and repeated segments around ad transitions
+  ([#1](https://github.com/scamorza/TwitchAdBlock/issues/1)). Improved, not eliminated. The junction
+  between the real playlist and the swapped-in one is unmarked — it is resynced by pause/play instead
+  of by rewriting the media sequence and emitting a discontinuity, which is what HLS provides for
+  exactly this. Untested rather than impossible.
+- Streams appearing "offline" during breaks
+  ([#2](https://github.com/scamorza/TwitchAdBlock/issues/2)). One cause was traced and fixed; the
+  original hypothesis about the player-type swap has never been confirmed.
+
+## What to expect
+
+Not defects. These follow from how the thing works and will not be fixed.
+
+- **Quality drops during some breaks.** When the only ad-free stream comes from `autoplay`, that is
+  what you get, and Twitch caps its ladder around 360p. Nothing on our side chooses it — it is the
+  last option before no picture at all. Restored the moment the break ends.
+- **The picture can freeze for the length of a break.** Where no rung of a different codec exists,
+  ad segments are answered with an empty body and the buffer drains. It keeps the stream alive and
+  the channel from being rendered offline; it does not keep it moving.
+- **Twitch buffers on its own** around any discontinuity, so a baseline of stalling survives whatever
+  the script does.
+- **No mobile** (`m.twitch.tv`), and no plans for it.
+
+## Why
+
+Supporting creators is fair, whether by watching ads or subscribing to skip them. It stops being
+fair when the ad load makes streams unwatchable — viewers should be encouraged to support someone,
+not worn down into it.
 
 ## Project status
 
-Twitch periodically changes its player and internal APIs, which breaks
-scripts like this one — expect ongoing maintenance, not a one-time fix.
+Twitch changes its player and internal APIs regularly, and that breaks scripts like this one. Expect
+ongoing maintenance rather than a finished thing.
+
+Where it can, the script avoids depending on things that change for no reason: Twitch's ad manager is
+found by the names of its static methods rather than by module id or asset hash, so a rebuild does
+not break it. Other places have no such option and are matched by value — the `stitched` marker in
+the playlist, the React root the player hangs off. Those are the likely breakage points, and they are
+the reason the console reports what it did rather than only what failed: a break handled with no
+`ad break started` line, or that line without Twitch's own `stitchedadstart` beside it, is how you
+find out something drifted before anyone files an issue.
 
 ## Credits and licence
 
-Thanks to [pixeltris](https://github.com/pixeltris) for `vaft` and for every
-other tool in the original repository, and to
-[CommanderRoot](https://github.com/CommanderRoot) for the automatic downscale
-script that `PreventAutoDownscale` is based on. MIT licensed, see
-[`LICENSE`](LICENSE).
+Thanks to [pixeltris](https://github.com/pixeltris) for `vaft` and the rest of TwitchAdSolutions —
+the approach this is built on is his. Thanks to [CommanderRoot](https://github.com/CommanderRoot),
+whose downscale script is where the quality-preference handling originally came from.
+
+MIT licensed, see [`LICENSE`](LICENSE).
 
 ## Disclaimer
 
-Twitch does not approve of or endorse ad-blocking tools like this one, and
-using it goes against their Terms of Service. Using `vaft` is entirely at
-your own risk, including the possibility of account suspension or a ban.
-This project is provided "as is", with no warranty of any kind — the
-author(s) take no responsibility for any consequences, direct or indirect,
-resulting from its use.
+Twitch does not approve of or endorse ad-blocking tools like this one, and using it goes against
+their Terms of Service. Use is entirely at your own risk, including the possibility of account
+suspension or a ban. Provided "as is", with no warranty of any kind — the authors take no
+responsibility for any consequences, direct or indirect, resulting from its use.
