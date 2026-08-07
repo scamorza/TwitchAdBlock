@@ -73,19 +73,34 @@ of rebuffer and one rung of quality, given back when the break ends.
 **What is still ours, and known.** The junction between the real playlist and the swapped-in one is
 unmarked: different media sequence, different timeline, resynced by pause/play rather than by
 rewriting `#EXT-X-MEDIA-SEQUENCE` and emitting `#EXT-X-DISCONTINUITY`, which is what HLS provides for
-exactly this. That is the mechanism behind segments being shown twice, and it is untested rather than
-attempted. Separately, where no rung of a different codec exists, stripping still drains the buffer
-and freezes the picture for the length of the break by design — it exists to keep the playlist valid,
-not to preserve continuity.
+exactly this.
+
+**That junction has since been measured, and it is not what stalls the player.** Instrumenting every
+swap and sampling the video element four times a second: sequence jumps of −23022, −25168 and +23027
+across the junction, on MPEG-TS and on fMP4 with the `#EXT-X-MAP` init segment changing underneath,
+cost **zero** frozen milliseconds every time. What cost about 2.5 seconds was the rendition changing —
+a decoder reset, taken with nine seconds of buffer still queued, so not starvation. Announcing that
+change through the player's own `setQuality` was measured too, interleaved A/B: no difference. 2.0.1
+removes the rendition change instead, which is why the stalling is gone.
+
+So rewriting the media sequence is a dead end for stalling, and the obvious fix is the wrong one.
+What was never measured is the other half of the issue title, the **repeated segments** — whether the
+unmarked junction is what shows a segment twice. That part is still untested rather than attempted.
+
+Separately, where no rung of a different codec exists, stripping still drains the buffer and freezes
+the picture for the length of the break by design — it exists to keep the playlist valid, not to
+preserve continuity.
 
 ---
 
 ## Both
 
-Both are closed on the tracker. What is left is breadth, not depth, and it needs channels we do not
-have: whether `mobile_feed` comes back clean everywhere it does here, whether the offline state still
-appears where a backup is available, and how often the unmarked junction shows as a repeat rather
-than a brief stall.
+Both are closed on the tracker. What is left needs channels and hours we do not have: whether
+`mobile_feed` comes back clean everywhere it does here, and whether it keeps doing so — the
+measurements behind 2.0.1 are a day of pre-rolls on two channels and two codecs, plus a handful of
+real midrolls, which is enough to change the default and not enough to call it settled. Then whether
+the offline state still appears where a backup is available, and how often the unmarked junction
+shows as a repeat rather than a brief stall.
 
 A useful report carries the `[VAFT2]` console output across the break — `ad break started`, which
 player type is serving, any `stepping down`, `ad break finished` — plus whether the channel is 2k/4k,
