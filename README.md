@@ -32,11 +32,22 @@ markers, it requests a playback access token under a different player type and s
 instead. Player types are tried in order, and within each one every rung of the quality ladder, so a
 break where the top rendition is stitched can still be served from a lower one.
 
-Where no clean stream exists at all — common on channels whose source is HEVC, since the ladder below
-it is AVC and a codec swap stops playback dead — two things happen. The player is stepped down to the
-best rung of a different codec, which turns one candidate into the whole ladder. Until that lands, ad
-segments are answered with an empty body: the playlist keeps its structure, so the player does not
-run out of media and get rendered as offline.
+Which request comes back clean is decided on the pair `playerType` + `platform` — the only two
+client-controlled fields that reach the signed token. `mobile_feed` asked as `android` is the one
+combination that is both ad-free and uncapped: 1080p on AVC, 1440p `hev1` on HEVC. Because it carries
+the source codec, a break served from it costs no rendition change at all, which is what the player
+stalls on. `popout` is the second chance at full quality — each request is its own ad auction, so
+asking again is worth one round-trip — and `autoplay` is last, ad-free too but capped at 640x360.
+
+That holds on any channel: where the old chain led with `embed` and `popout` — each its own ad
+auction, so a break could still fall through both to `autoplay` — the exemption is now had on the
+first request rather than by retrying.
+
+Where no clean stream exists at all — now rare, since `mobile_feed` covers the HEVC channels that
+used to have nothing but an AVC ladder underneath them — two things happen. The player is stepped
+down to the best rung of a different codec, which turns one candidate into the whole ladder. Until
+that lands, ad segments are answered with an empty body: the playlist keeps its structure, so the
+player does not run out of media and get rendered as offline.
 
 **Display ads** — the pod above chat, squeezeback, lower third, pause ads — are decided in the
 browser, so none of the above ever sees them. Twitch's own ad manager holds every ad request in a
@@ -89,28 +100,22 @@ or `chrome://net-export` captures: they contain your session tokens.
 
 ## Known issues
 
-Both are closed on the tracker — known limitations rather than open work. Detail and current
-status in [`doc/issue.md`](doc/issue.md).
+Both are closed on the tracker. Full detail in [`doc/issue.md`](doc/issue.md).
 
-- Freezing and repeated segments around ad transitions
-  ([#1](https://github.com/scamorza/TwitchAdBlock/issues/1)). Improved, not eliminated. The junction
-  between the real playlist and the swapped-in one is unmarked — it is resynced by pause/play instead
-  of by rewriting the media sequence and emitting a discontinuity, which is what HLS provides for
-  exactly this. Untested rather than impossible.
-- Streams appearing "offline" during breaks
-  ([#2](https://github.com/scamorza/TwitchAdBlock/issues/2)). One cause was traced and fixed; the
-  original hypothesis about the player-type swap has never been confirmed.
+| Issue | Status | What is left |
+|---|---|---|
+| [#1](https://github.com/scamorza/TwitchAdBlock/issues/1) — freezing and repeated segments at ad transitions | Closed. 2.0.1 removed the rendition change, which is what stalled the player — measured, unlike the unmarked junction, which costs nothing | The repeats: never measured, and not explained by the junction either way |
+| [#2](https://github.com/scamorza/TwitchAdBlock/issues/2) — streams appearing "offline" during breaks | Closed. The traced cause is fixed, and HEVC channels now get a same-codec backup | Never confirmed whether external reporters were hitting that same cause |
 
 ## What to expect
 
-Not defects. These follow from how the thing works and will not be fixed.
+Not defects. These follow from how the thing works.
 
-- **Quality drops during some breaks.** When the only ad-free stream comes from `autoplay`, that is
-  what you get, and Twitch caps its ladder around 360p. Nothing on our side chooses it — it is the
-  last option before no picture at all. Restored the moment the break ends.
-- **The picture can freeze for the length of a break.** Where no rung of a different codec exists,
-  ad segments are answered with an empty body and the buffer drains. It keeps the stream alive and
-  the channel from being rendered offline; it does not keep it moving.
+- **Quality can drop during a break**, but only if `mobile_feed` and `popout` both come back stitched
+  and the break falls to `autoplay`, whose ladder Twitch caps at 640x360. Restored when it ends.
+- **The picture can freeze for the length of a break**, where the ladder carries no rung of a
+  different codec and ad segments are answered with an empty body. That keeps the stream alive,
+  not moving.
 - **Twitch buffers on its own** around any discontinuity, so a baseline of stalling survives whatever
   the script does.
 - **No mobile** (`m.twitch.tv`), and no plans for it.

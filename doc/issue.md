@@ -3,14 +3,19 @@
 Both were carried over from `pixeltris/TwitchAdSolutions` and describe the older script, down to
 option names that no longer exist. This is where the rewritten script leaves them.
 
+**Updated in 2.0.1.** The backup search now leads with `mobile_feed` asked as `android`: ad-free and
+uncapped, 1440p `hev1` on HEVC. HEVC channels — where both issues were worst — now get a same-codec
+backup, so stripping and the codec step-down became a last resort rather than the ordinary path. The
+evidence below predates that; where it treats stripping as routine, read it as history.
+
 ---
 
 ## #2 — Stream can appear "offline" during ad breaks
 
-**Reproduced, and one cause traced.** It shows up reliably on HEVC channels, because that is where
-segment stripping is reached on almost every break: an HEVC source sits above a ladder of AVC
-transcodes, so a backup player type rarely carries a variant the player can decode, and stripping is
-what is left.
+**Reproduced, and one cause traced.** It showed up reliably on HEVC channels, because that was where
+segment stripping was reached on almost every break: an HEVC source sits above a ladder of AVC
+transcodes, so a backup player type rarely carried a variant the player could decode, and stripping
+was what was left. Since 2.0.1 `mobile_feed` carries `hev1`, so those channels have a backup.
 
 The mechanism is not the one the issue guessed at. Stripping used to delete the ad segment lines
 from the playlist. On a break where every segment is an ad that leaves a playlist with no media at
@@ -35,10 +40,10 @@ than only during breaks.
 The second — that serving the player a stream fetched under a different player type is what does it —
 was isolated with `simulateAd()`, which forces exactly that swap with no real break behind it: same
 playlist substitution, no ad markers, no stripped segments. Eight forced swaps, alternating between
-the first usable backup (`embed`, quality held) and the fall all the way to `autoplay` (640x360, the
-most abrupt swap available). Detection watched several signals rather than one: the viewer count and
-the LIVE indicator disappearing, a player content gate appearing, and the player reaching `Ended`,
-that last one being the mechanism we traced ourselves and had to keep distinct.
+the first usable backup at the time (`embed`, quality held) and the fall all the way to `autoplay`
+(640x360, the most abrupt swap available). Detection watched several signals rather than one: the
+viewer count and the LIVE indicator disappearing, a player content gate appearing, and the player
+reaching `Ended`, that last one being the mechanism we traced ourselves and had to keep distinct.
 
 Zero offline states across all eight. The swap alone does not produce it.
 
@@ -68,18 +73,34 @@ of rebuffer and one rung of quality, given back when the break ends.
 **What is still ours, and known.** The junction between the real playlist and the swapped-in one is
 unmarked: different media sequence, different timeline, resynced by pause/play rather than by
 rewriting `#EXT-X-MEDIA-SEQUENCE` and emitting `#EXT-X-DISCONTINUITY`, which is what HLS provides for
-exactly this. That is the mechanism behind segments being shown twice, and it is untested rather than
-attempted. Separately, where no rung of a different codec exists, stripping still drains the buffer
-and freezes the picture for the length of the break by design — it exists to keep the playlist valid,
-not to preserve continuity.
+exactly this.
+
+**That junction has since been measured, and it is not what stalls the player.** Instrumenting every
+swap and sampling the video element four times a second: sequence jumps of −23022, −25168 and +23027
+across the junction, on MPEG-TS and on fMP4 with the `#EXT-X-MAP` init segment changing underneath,
+cost **zero** frozen milliseconds every time. What cost about 2.5 seconds was the rendition changing —
+a decoder reset, taken with nine seconds of buffer still queued, so not starvation. Announcing that
+change through the player's own `setQuality` was measured too, interleaved A/B: no difference. 2.0.1
+removes the rendition change instead, which is why the stalling is gone.
+
+So rewriting the media sequence is a dead end for stalling, and the obvious fix is the wrong one.
+What was never measured is the other half of the issue title, the **repeated segments** — whether the
+unmarked junction is what shows a segment twice. That part is still untested rather than attempted.
+
+Separately, where no rung of a different codec exists, stripping still drains the buffer and freezes
+the picture for the length of the break by design — it exists to keep the playlist valid, not to
+preserve continuity.
 
 ---
 
 ## Both
 
-Both are closed on the tracker. What is left is breadth, not depth, and it needs channels we do not
-have: which ones reach stripping, whether the offline state still appears where a backup is
-available, and how often the unmarked junction shows as a repeat rather than a brief stall.
+Both are closed on the tracker. What is left needs channels and hours we do not have: whether
+`mobile_feed` comes back clean everywhere it does here, and whether it keeps doing so — the
+measurements behind 2.0.1 are a day of pre-rolls on two channels and two codecs, plus a handful of
+real midrolls, which is enough to change the default and not enough to call it settled. Then whether
+the offline state still appears where a backup is available, and how often the unmarked junction
+shows as a repeat rather than a brief stall.
 
 A useful report carries the `[VAFT2]` console output across the break — `ad break started`, which
 player type is serving, any `stepping down`, `ad break finished` — plus whether the channel is 2k/4k,

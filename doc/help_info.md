@@ -17,7 +17,7 @@ No arguments. Returns the full state, read at the moment of the call.
 | `version` | script version |
 | `adActive` | `true` while a break detected in the manifest is running |
 | `adIsMidroll` | midroll or pre-roll |
-| `backupPlayerType` | which `playerType` is serving the clean stream (`embed`, `popout`, `autoplay`), `null` if none |
+| `backupPlayerType` | which `playerType` is serving the clean stream (`mobile_feed`, `popout`, `autoplay`), `null` if none |
 | `strippingSegments` | `true` when no clean source is available and ad segments are being emptied |
 | `playerAdEvent` | last ad event reported by Twitch's own player |
 | `tokenMode` | current GraphQL token rewriting mode |
