@@ -3,14 +3,19 @@
 Both were carried over from `pixeltris/TwitchAdSolutions` and describe the older script, down to
 option names that no longer exist. This is where the rewritten script leaves them.
 
+**Updated in 2.0.1.** The backup search now leads with `mobile_feed` asked as `android`: ad-free and
+uncapped, 1440p `hev1` on HEVC. HEVC channels — where both issues were worst — now get a same-codec
+backup, so stripping and the codec step-down became a last resort rather than the ordinary path. The
+evidence below predates that; where it treats stripping as routine, read it as history.
+
 ---
 
 ## #2 — Stream can appear "offline" during ad breaks
 
-**Reproduced, and one cause traced.** It shows up reliably on HEVC channels, because that is where
-segment stripping is reached on almost every break: an HEVC source sits above a ladder of AVC
-transcodes, so a backup player type rarely carries a variant the player can decode, and stripping is
-what is left.
+**Reproduced, and one cause traced.** It showed up reliably on HEVC channels, because that was where
+segment stripping was reached on almost every break: an HEVC source sits above a ladder of AVC
+transcodes, so a backup player type rarely carried a variant the player could decode, and stripping
+was what was left. Since 2.0.1 `mobile_feed` carries `hev1`, so those channels have a backup.
 
 The mechanism is not the one the issue guessed at. Stripping used to delete the ad segment lines
 from the playlist. On a break where every segment is an ad that leaves a playlist with no media at
@@ -35,10 +40,10 @@ than only during breaks.
 The second — that serving the player a stream fetched under a different player type is what does it —
 was isolated with `simulateAd()`, which forces exactly that swap with no real break behind it: same
 playlist substitution, no ad markers, no stripped segments. Eight forced swaps, alternating between
-the first usable backup (`embed`, quality held) and the fall all the way to `autoplay` (640x360, the
-most abrupt swap available). Detection watched several signals rather than one: the viewer count and
-the LIVE indicator disappearing, a player content gate appearing, and the player reaching `Ended`,
-that last one being the mechanism we traced ourselves and had to keep distinct.
+the first usable backup at the time (`embed`, quality held) and the fall all the way to `autoplay`
+(640x360, the most abrupt swap available). Detection watched several signals rather than one: the
+viewer count and the LIVE indicator disappearing, a player content gate appearing, and the player
+reaching `Ended`, that last one being the mechanism we traced ourselves and had to keep distinct.
 
 Zero offline states across all eight. The swap alone does not produce it.
 
@@ -78,8 +83,9 @@ not to preserve continuity.
 ## Both
 
 Both are closed on the tracker. What is left is breadth, not depth, and it needs channels we do not
-have: which ones reach stripping, whether the offline state still appears where a backup is
-available, and how often the unmarked junction shows as a repeat rather than a brief stall.
+have: whether `mobile_feed` comes back clean everywhere it does here, whether the offline state still
+appears where a backup is available, and how often the unmarked junction shows as a repeat rather
+than a brief stall.
 
 A useful report carries the `[VAFT2]` console output across the break — `ad break started`, which
 player type is serving, any `stepping down`, `ad break finished` — plus whether the channel is 2k/4k,
