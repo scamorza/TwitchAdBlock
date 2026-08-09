@@ -87,6 +87,7 @@ up. The console entry points are listed on load and documented in
 | `backup via <type> had ads at every rendition` | That player type was stitched at every rung; moving to the next. |
 | `stepping down from … to …` | No same-codec backup, so the player was moved to another codec to unlock one. |
 | `ad break finished on <channel>` | Over; quality is handed back on the next line. |
+| `left <channel> mid-break -- state cleared for <channel>` | Channel changed during a break, so the break state was dropped instead of carried over. A fresh break on the new channel a second later is Twitch's own: arriving is a new player session, and that is its own auction. |
 | `denied a picture-by-picture token locally` | The mini player above chat was refused. |
 | `OVERLAY AD suspected …` | A display ad got through the decline. Worth an issue. |
 | `no clean playlist and stripping is off -- ads will be shown` | Exactly what it says. |
