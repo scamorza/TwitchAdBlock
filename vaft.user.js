@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      2.0.1
+// @version      2.0.2
 // @description  Twitch ad blocking
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -762,6 +762,133 @@
                 (State.activeBackupPlayerType ? ' (' + State.activeBackupPlayerType + ')' : '');
         }
         overlay.style.display = State.adActive ? 'block' : 'none';
+    }
+
+    // Twitch is a single-page app: switching channel replaces the stream without a reload, and the
+    // playlist that would report the end of the break stops being polled. Nothing expires on its
+    // own -- not the banner, and not the codec step-down, which otherwise keeps the viewer off
+    // automatic and aims the next backup search at the previous channel's ladder.
+    const Navigation = { channel: null, left: null };
+
+    // A playlist response for the channel being left can land after the reset and repopulate it.
+    // Narrow on purpose: dropping anything that is not the current channel would also drop real
+    // breaks on embed players, where the location names no channel at all. A stale label costs less.
+    //
+    // left holds one channel, so A -> B -> C stops filtering A. Deliberate: the window is a single
+    // playlist round-trip, and two channel changes inside it are not reachable by hand. The reset
+    // has already cleared the state either way -- this only keeps a late message from undoing it.
+    function messageIsStale(data) {
+        const channel = data.channel && String(data.channel).toLowerCase();
+        if (!channel || channel === 'simulation' || !Navigation.left) {
+            return false;
+        }
+        return channel === Navigation.left && channel !== Navigation.channel;
+    }
+
+    // Not exhaustive on purpose: a page mistaken for a channel still reads as a change on the way out.
+    const NOT_A_CHANNEL = {
+        directory: 1, videos: 1, settings: 1, subscriptions: 1, wallet: 1, drops: 1,
+        friends: 1, downloads: 1, jobs: 1, turbo: 1, prime: 1, search: 1, u: 1, p: 1, '': 1
+    };
+
+    function channelFromLocation() {
+        try {
+            const parts = document.location.pathname.split('/').filter(Boolean);
+            if (!parts.length) {
+                return null;
+            }
+            if (parts[0] === 'popout' || parts[0] === 'moderator') {
+                return parts[1] ? parts[1].toLowerCase() : null;
+            }
+            return NOT_A_CHANNEL[parts[0]] ? null : parts[0].toLowerCase();
+        } catch (err) {
+            log('debug', 'could not read a channel from the location: ' + err);
+            return null;
+        }
+    }
+
+    function resetForChannelChange(previous, next, how) {
+        const carried = State.adActive || QualityFallback.active;
+        Navigation.left = previous;
+        State.adActive = false;
+        State.adIsMidroll = false;
+        State.activeBackupPlayerType = null;
+        State.strippingSegments = false;
+        State.playerAdEvent = null;
+        clearOnce('blocking');
+        clearOnce('leak');
+
+        // setQuality is what took the viewer out of automatic, so that much is ours to undo. The
+        // remembered rung is not re-applied: it names a ladder that no longer exists.
+        const stepped = QualityFallback.active;
+        const wasAuto = QualityFallback.wasAuto;
+        QualityFallback.active = false;
+        QualityFallback.originalName = null;
+        QualityFallback.wasAuto = false;
+        if (stepped && wasAuto) {
+            try {
+                getPlayer()?.player?.setAutoQualityMode(true);
+            } catch (err) {
+                log('debug', 'could not hand quality back to automatic after a channel change: ' + err);
+            }
+        }
+
+        // Releases the worker's copy of the break and the step-down's variant preference.
+        postToWorkers({ key: 'ChannelChanged', value: previous });
+
+        // Swept, not left to updateBanner: that only reaches the overlay under the current
+        // .video-player, and React may have replaced it.
+        try {
+            document.querySelectorAll('.vaft2-overlay').forEach((el) => { el.style.display = 'none'; });
+        } catch (err) {
+            log('debug', 'could not hide the banner after a channel change: ' + err);
+        }
+        updateBanner();
+
+        // No pause/play and no reload: Twitch is already rebuilding the stream.
+        const from = previous || 'a non-channel page';
+        const to = next || 'a non-channel page';
+        if (carried) {
+            log('info', 'left ' + from + ' mid-break -- state cleared for ' + to);
+        } else {
+            log('debug', 'channel changed, ' + from + ' -> ' + to + ' (nothing carried) via ' + how);
+        }
+    }
+
+    // Keyed on history rather than on anything of Twitch's: pushState, replaceState and popstate are
+    // the only ways a single-page app changes the URL, and they do not get renamed in a rebuild.
+    function installNavigationWatch() {
+        Navigation.channel = channelFromLocation();
+        // how is logged: every change arriving as 'poll' means the history hooks are not reached.
+        const onNavigate = (how) => {
+            try {
+                const next = channelFromLocation();
+                if (next === Navigation.channel) {
+                    return;
+                }
+                const previous = Navigation.channel;
+                Navigation.channel = next;
+                resetForChannelChange(previous, next, how);
+            } catch (err) {
+                log('debug', 'navigation watch error: ' + err);
+            }
+        };
+        ['pushState', 'replaceState'].forEach((name) => {
+            const original = history[name];
+            if (typeof original !== 'function') {
+                return;
+            }
+            history[name] = function () {
+                const result = original.apply(this, arguments);
+                // After the call: the location only updates once the original has run.
+                onNavigate(name);
+                return result;
+            };
+        });
+        window.addEventListener('popstate', () => onNavigate('popstate'));
+        // Backstop for a navigation landing through neither: two seconds of stale banner at worst,
+        // against the state staying stuck for the session.
+        setInterval(() => onNavigate('poll'), 2000);
     }
 
     // Detection keys on an effect no implementation can avoid -- the video getting smaller than
@@ -1816,7 +1943,7 @@ function installFetchHook() {
 var OUR_MESSAGE_KEYS = {
     UpdateDeviceId: 1, UpdateClientVersion: 1, UpdateClientSession: 1,
     UpdateIntegrity: 1, UpdateAuthorization: 1, PlayerReloaded: 1, FetchResponse: 1,
-    SimulateAd: 1, PreferVariant: 1
+    SimulateAd: 1, PreferVariant: 1, ChannelChanged: 1
 };
 
 // Registered before Twitch's worker is loaded, so this listener runs first and can stop our own
@@ -1840,6 +1967,20 @@ self.addEventListener('message', function (e) {
     // What rendition the backup search should aim at, when the page knows better than the player
     // does. Sent after a codec step-down and cleared at the end of the break.
     if (data.key === 'PreferVariant') { preferredVariant = data.value || null; return; }
+    if (data.key === 'ChannelChanged') {
+        // onMediaPlaylist is what ends a break, and the playlist being left stops being polled, so
+        // its break never ends: returning later would resume it. The cached master playlists survive
+        // on purpose, the backup in use does not.
+        preferredVariant = null;
+        var left = data.value && streamsByChannel[data.value];
+        if (left) {
+            left.adActive = false;
+            left.stripping = false;
+            left.cleanSince = null;
+            left.activeBackup = null;
+        }
+        return;
+    }
     if (data.key === 'UpdateAuthorization') { GQLState.authorization = data.value; return; }
     if (data.key === 'PlayerReloaded') { lastReloadAt = Date.now(); return; }
     if (data.key === 'SimulateAd') {
@@ -1935,6 +2076,11 @@ installFetchHook();
 
                 this.addEventListener('message', async (event) => {
                     const data = event.data || {};
+                    if (messageIsStale(data)) {
+                        log('debug', 'ignoring a late ' + data.key + ' for ' + data.channel +
+                            ', that channel has been left');
+                        return;
+                    }
                     switch (data.key) {
                         case 'Log':
                             log(data.level || 'info', data.message);
@@ -2094,6 +2240,8 @@ installFetchHook();
         Visibility.allowNextVisibilityChange = document.visibilityState === 'hidden';
     } catch {}
     installVisibilityLayer();
+    // At document-start: the first channel has to be recorded before any navigation can happen.
+    installNavigationWatch();
     // Not in onReady: the first ad request of a session can be issued before DOMContentLoaded, and
     // the retry loop costs nothing while the bundle is still loading.
     startAdManagerDecline();
