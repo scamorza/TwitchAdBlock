@@ -101,12 +101,9 @@ or `chrome://net-export` captures: they contain your session tokens.
 
 ## Known issues
 
-Both are closed on the tracker. Full detail in [`doc/issue.md`](doc/issue.md).
-
-| Issue | Status | What is left |
-|---|---|---|
-| [#1](https://github.com/scamorza/TwitchAdBlock/issues/1) — freezing and repeated segments at ad transitions | Closed. 2.0.1 removed the rendition change, which is what stalled the player — measured, unlike the unmarked junction, which costs nothing | The repeats: never measured, and not explained by the junction either way |
-| [#2](https://github.com/scamorza/TwitchAdBlock/issues/2) — streams appearing "offline" during breaks | Closed. The traced cause is fixed, and HEVC channels now get a same-codec backup | Never confirmed whether external reporters were hitting that same cause |
+None. The issues inherited from upstream have been closed. The information was turning ambiguous
+across versions, so I preferred to remove entirely what is no longer worth knowing. If you run into
+a problem, open a new issue.
 
 ## What to expect
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      2.0.2
+// @version      2.0.3
 // @description  Twitch ad blocking
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -67,6 +67,11 @@
         // Also strips parent_domains, which is what stops the embed-shaped fake ads.
         ForceAccessTokenPlayerType: 'popout',
         StripAdSegments: true,
+        // Renumbers the served playlist onto the numbering the player already believes in. Without
+        // it the gap between the two sessions grows by one break's worth of segments every time and
+        // never comes back, and each break loses (gap x segment duration) of video. Turn off only
+        // to compare against the old behaviour.
+        RenumberSequence: true,
         // OFF: where a new player session buys a pre-roll, the end-of-break reload buys another ad,
         // which ends, which reloads again. Pause/play is used instead and resyncs fine.
         ReloadPlayerAfterAd: false,
@@ -757,9 +762,10 @@
         }
         const text = overlay.querySelector('p');
         if (text) {
+            // No backup player type: the banner ends up in screenshots and recordings. It stays in
+            // the console and in status(). Stripping stays, it warns the picture is about to freeze.
             text.textContent = 'Blocking' + (State.adIsMidroll ? ' midroll' : '') + ' ads' +
-                (State.strippingSegments ? ' (stripping)' : '') +
-                (State.activeBackupPlayerType ? ' (' + State.activeBackupPlayerType + ')' : '');
+                (State.strippingSegments ? ' (stripping)' : '');
         }
         overlay.style.display = State.adActive ? 'block' : 'none';
     }
@@ -1682,6 +1688,18 @@ function tryPlayerType(stream, playerType, realFetch) {
                 (preferredVariant ? ' (asked for by the page)' : ' (what the player is on)'));
             // First clean rung wins. A lower rendition beats a frozen picture, and the viewer gets
             // their quality back when the break ends.
+            // Stay on the rendition this break picked. Only the player type was pinned, so every
+            // poll re-ran the choice and the encode could change under the player -- another
+            // resolution, another session, another EXT-X-MAP on fMP4 -- while the renumbering kept
+            // claiming the segments were contiguous. Dropped with activeBackup at the end of a break.
+            var pinned = -1;
+            if (stream.activeVariantUrl) {
+                for (var p = 0; p < candidates.length; p++) {
+                    if (candidates[p].url === stream.activeVariantUrl) { pinned = p; break; }
+                }
+                if (pinned > 0) { candidates = [candidates[pinned]].concat(candidates.slice(0, pinned), candidates.slice(pinned + 1)); }
+            }
+
             var i = 0;
             function attempt() {
                 // Do not log the urls to chase an external probe finding this player type clean:
@@ -1704,6 +1722,13 @@ function tryPlayerType(stream, playerType, realFetch) {
                             // The player keeps the label it had when we swapped the playlist under
                             // it, so its own reading is worthless during a break.
                             stream.servedResolution = candidates[index].resolution;
+                            if (stream.activeVariantUrl !== candidates[index].url) {
+                                if (stream.activeVariantUrl) {
+                                    wlog('info', 'backup rendition changed mid-break to ' +
+                                        candidates[index].resolution + ' -- the previous one is gone or stitched');
+                                }
+                                stream.activeVariantUrl = candidates[index].url;
+                            }
                             if (index > 0) {
                                 wlog('info', 'backup via ' + playerType + ' was stitched at the' +
                                     ' closest rendition, took rendition ' + (index + 1) + ' of ' +
@@ -1763,11 +1788,13 @@ function findCleanPlaylist(stream, realFetch) {
                 if (text) { return { playerType: current, text: text }; }
                 wlog('debug', 'backup ' + current + ' picked up ads, searching again');
                 stream.activeBackup = null;
+                stream.activeVariantUrl = null;
                 return searchPlayerTypes(stream, realFetch);
             })
             .catch(function (err) {
                 wlogOnce('backup:' + current, 'debug', 'backup stream via ' + current + ' failed: ' + (err && err.message ? err.message : err));
                 stream.activeBackup = null;
+                stream.activeVariantUrl = null;
                 return searchPlayerTypes(stream, realFetch);
             });
     }
@@ -1810,10 +1837,226 @@ function onMasterPlaylist(url, text) {
     return text;
 }
 
+// -- sequence renumbering ----------------------------------------------------------------------
+// MEDIA-SEQUENCE is per session and counts ads too, so an ad-free backup drifts behind by a break's
+// worth every time. The player fetches by number, so the drift costs gap x segment duration of
+// video. We renumber what we serve, moving the offset only at the edges of a break.
+var SEQ_TAG = '#EXT-X-MEDIA-SEQUENCE:';
+// Segments the head may drift from the elapsed time before an exit re-anchor is refused.
+var SEQ_STEP_TOLERANCE = 6;
+
+function seqRead(text) {
+    var at = text.indexOf(SEQ_TAG);
+    if (at < 0) { return null; }
+    var end = text.indexOf('\\n', at);
+    var value = parseInt(text.substring(at + SEQ_TAG.length, end < 0 ? text.length : end), 10);
+    return isNaN(value) ? null : value;
+}
+
+function seqWrite(text, value) {
+    var at = text.indexOf(SEQ_TAG);
+    if (at < 0) { return null; }
+    var end = text.indexOf('\\n', at);
+    if (end < 0) { end = text.length; }
+    if (end > 0 && text.charAt(end - 1) === '\\r') { end--; }
+    return text.substring(0, at) + SEQ_TAG + value + text.substring(end);
+}
+
+function seqSegments(text) {
+    // CRLF: a trailing \\r makes Date.parse NaN and kills every anchor silently.
+    var out = [], pdt = null, lines = text.replace(/\\r/g, '').split('\\n');
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        if (line.indexOf('#EXT-X-PROGRAM-DATE-TIME:') === 0) { pdt = Date.parse(line.slice(25)); }
+        else if (line.indexOf('#EXTINF:') === 0) {
+            out.push({ pdt: pdt, d: parseFloat(line.slice(8)) || 0 });
+            pdt = null;
+        }
+    }
+    return out;
+}
+
+// The tail: the only anchor meaning the same instant in both sessions, since the original's head
+// freezes during a break while its tail follows the live edge.
+function seqTail(text) {
+    var seq = seqRead(text), segs = seqSegments(text);
+    if (seq === null || !segs.length || !segs[segs.length - 1].pdt) { return null; }
+    return { n: seq + segs.length - 1, pdt: segs[segs.length - 1].pdt, seq: seq, count: segs.length };
+}
+
+// The number this playlist gives to an instant. Interpolated: the two sessions' boundaries sit a
+// few hundred ms apart, so an exact PDT lookup finds nothing.
+function seqNumberAt(text, pdt) {
+    var seq = seqRead(text), segs = seqSegments(text);
+    if (seq === null || segs.length < 2 || !segs[0].pdt || !segs[segs.length - 1].pdt || !pdt) { return null; }
+    var first = segs[0].pdt, last = segs[segs.length - 1].pdt;
+    if (!(last > first)) { return null; }
+
+    // Real boundaries, not a uniform step: a break's window mixes durations and an average is off
+    // by a segment or two.
+    if (pdt >= first && pdt <= last) {
+        var at = first;
+        for (var i = 0; i < segs.length - 1; i++) {
+            var d = (segs[i + 1].pdt !== null && segs[i + 1].pdt !== undefined)
+                ? segs[i + 1].pdt - at
+                : (segs[i].d || 0) * 1000;
+            if (!(d > 0)) { continue; }
+            if (pdt <= at + d) { return seq + i + (pdt - at) / d; }
+            at += d;
+        }
+        return seq + segs.length - 1;
+    }
+
+    // Outside the window only the average is left, and one window of slack is as far as it reaches:
+    // beyond that a stale anchor gets a confident, meaningless answer.
+    var step = (last - first) / (segs.length - 1);
+    if (!(step > 0)) { return null; }
+    var slack = last - first;
+    if (pdt < first - slack || pdt > last + slack) { return null; }
+    return seq + (pdt - first) / step;
+}
+
+function seqServe(stream, text, seq, field) {
+    var floor = (stream.seqLastHead === null || stream.seqLastHead === undefined) ? 0 : stream.seqLastHead;
+    if (floor < 0) { floor = 0; }
+    var head = seq + stream[field];
+    if (head < floor) {
+        // Raise the offset, not the number: pinning it turns the step into a stall, the playlist
+        // advancing while the number does not. Floor at zero, MEDIA-SEQUENCE is unsigned.
+        stream[field] = floor - seq;
+        head = floor;
+    }
+    stream.seqLastHead = head;
+    if (head === seq) { return text; }
+    var rewritten = seqWrite(text, head);
+    return rewritten === null ? text : rewritten;
+}
+
+// Anything from the original -- outside a break, or a stripped one -- takes the session offset.
+// Always through seqServe, so the floor sees it.
+function seqApplySessionOffset(stream, text) {
+    var seq = seqRead(text);
+    if (seq === null) { return text; }
+    return seqServe(stream, text, seq, 'seqOffset');
+}
+
+// A session restart needs no special case: the floor raises the offset and the numbering carries
+// on. Do not add a detector that serves raw -- a variant switch looks identical, and the append is
+// then refused.
+
+// Re-anchors an offset so a new source continues the numbering already served: each session numbers
+// from its own base. False when there is no usable anchor, and the caller keeps what it had.
+function seqReanchor(stream, text, field) {
+    if (stream.seqServedPdt === undefined || stream.seqServedNumber === undefined) { return false; }
+    var here = seqNumberAt(text, stream.seqServedPdt);
+    if (here === null) { return false; }
+    stream[field] = Math.round(stream.seqServedNumber - here);
+    return true;
+}
+
+// A stripped break: no backup found, so we are back on the original numbering.
+function seqStrippedBreak(stream, text) {
+    if (!CONFIG.renumberSequence) { return text; }
+    // Marked only on success, or a failed anchor is never retried and rides the whole break.
+    if (stream.seqInBreak && stream.seqSource !== 'orig' && seqReanchor(stream, text, 'seqOffset')) {
+        stream.seqSource = 'orig';
+    }
+    // Still a break, or the exit never re-anchors.
+    if (!stream.seqInBreak) {
+        stream.seqInBreak = true;
+        stream.seqSource = 'orig';
+    }
+    var served = seqApplySessionOffset(stream, text);
+    var tail = seqTail(text);
+    if (tail) {
+        stream.seqServedPdt = tail.pdt;
+        stream.seqServedNumber = stream.seqLastHead + (tail.count - 1);
+    }
+    return served;
+}
+
+// Outside a break, and the moment one ends: the original advanced by every stitched segment while
+// we were away, so the offset is re-anchored here.
+function seqOutsideBreak(stream, text) {
+    if (!CONFIG.renumberSequence) { return text; }
+    // On adActive, not the markers: a pod drops them between videos and the break stays open.
+    if (stream.seqInBreak && !stream.adActive) {
+        stream.seqInBreak = false;
+        stream.seqSource = 'orig';
+        var previous = stream.seqOffset;
+        if (seqReanchor(stream, text, 'seqOffset')) {
+            // Continuity, not magnitude: a size cap would have to exempt the pre-roll exit, which
+            // moves by thousands and is still continuous.
+            var head = seqRead(text), tail = seqTail(text);
+            if (head !== null && tail && stream.seqLastHead !== null && stream.seqLastHead !== undefined &&
+                stream.seqServedPdt) {
+                // Tolerance from the elapsed time: a constant conflates the offset moving with the
+                // playlist advancing, and rejects good corrections.
+                var step = (tail.d || 2) * 1000;
+                var expected = (tail.pdt - stream.seqServedPdt) / step;
+                var actual = (head + stream.seqOffset) - stream.seqLastHead;
+                if (Math.abs(actual - expected) > SEQ_STEP_TOLERANCE) {
+                    wlog('info', '[SEQ] exit re-anchor rejected: offset ' + stream.seqOffset + ' moves the head by ' +
+                        actual.toFixed(1) + ' segments while ' + expected.toFixed(1) + ' went by -- keeping ' + previous);
+                    stream.seqOffset = previous;
+                }
+            }
+        }
+        stream.seqBlind = false;
+    }
+    return seqApplySessionOffset(stream, text);
+}
+
+// Inside a break, serving the backup in place of the original.
+function seqInsideBreak(stream, text, cleanText) {
+    if (!CONFIG.renumberSequence) { return cleanText; }
+    // No tail: use the backup's own offset. The session offset on a backup number gets written back
+    // into seqOffset by the floor and corrupts it for good.
+    var backup = seqTail(cleanText);
+    if (!backup) {
+        if (stream.seqInBreak) { return seqServe(stream, cleanText, seqRead(cleanText), 'seqBackupOffset'); }
+        return cleanText;
+    }
+
+    // The backup changes identity when its player type picks up ads, and another session numbers
+    // from another base.
+    var source = 'backup:' + (stream.activeBackup || '?');
+    if (stream.seqInBreak && stream.seqSource !== source && seqReanchor(stream, cleanText, 'seqBackupOffset')) {
+        stream.seqSource = source;
+    }
+
+    if (!stream.seqInBreak) {
+        stream.seqInBreak = true;
+        stream.seqSource = source;
+        if (stream.seqLastHead === null || stream.seqLastHead === undefined) {
+            // Nothing seen outside the break, so the player's numbers are unknown and a drift would
+            // drag it backwards. Ride what is in flight, re-anchor at the exit. Every pre-roll.
+            stream.seqBackupOffset = 0;
+            stream.seqBlind = true;
+        } else {
+            var original = seqTail(text);
+            if (!original) { stream.seqInBreak = false; return cleanText; }
+            stream.seqBackupOffset = stream.seqOffset + (original.n - backup.n);
+        }
+    }
+
+    var served = seqServe(stream, cleanText, backup.seq, 'seqBackupOffset');
+    // Anchor from the number written, not the formula: the floor makes them differ, and the exit
+    // would agree with itself while the player starves.
+    stream.seqServedPdt = backup.pdt;
+    stream.seqServedNumber = stream.seqLastHead + (backup.count - 1);
+    return served;
+}
+
 function onMediaPlaylist(url, text, realFetch) {
     var stream = streamsByPlaylistUrl[url];
     if (!stream) { return Promise.resolve(text); }
     stream.currentVariant = stream.variants[url] || stream.currentVariant;
+    if (stream.seqOffset === undefined) {
+        stream.seqOffset = 0;
+        stream.seqLastHead = null;
+        stream.seqInBreak = false;
+    }
 
     // Waiting for a midroll on a particular channel is not a workable way to reach the interesting
     // cases, the codec mismatch on a 2k/4k channel above all.
@@ -1857,10 +2100,11 @@ function onMediaPlaylist(url, text, realFetch) {
                 // master playlists deliberately survive: they are what make the next break start
                 // without paying for the token round-trip all over again.
                 stream.activeBackup = null;
+                stream.activeVariantUrl = null;
                 self.postMessage({ key: 'AdEnded', channel: stream.channel });
             }
         }
-        return Promise.resolve(text);
+        return Promise.resolve(seqOutsideBreak(stream, text));
     }
     // Markers are back: whatever gap we were in was between ads, not the end of the break
     if (stream.cleanSince) {
@@ -1885,15 +2129,15 @@ function onMediaPlaylist(url, text, realFetch) {
     return findCleanPlaylist(stream, realFetch).then(function (clean) {
         if (clean) {
             self.postMessage({ key: 'AdBlocked', channel: stream.channel, playerType: clean.playerType, isMidroll: isMidroll, stripping: false, resolution: stream.servedResolution || null });
-            return clean.text;
+            return seqInsideBreak(stream, text, clean.text);
         }
         if (CONFIG.stripAdSegments) {
             var strippedText = stripAds(text, stream);
             self.postMessage({ key: 'AdBlocked', channel: stream.channel, playerType: null, isMidroll: isMidroll, stripping: true });
-            return strippedText;
+            return seqStrippedBreak(stream, strippedText);
         }
         wlogOnce('leak', 'warn', 'no clean playlist and stripping is off -- ads will be shown');
-        return text;
+        return seqStrippedBreak(stream, text);
     });
 }
 
@@ -1978,6 +2222,17 @@ self.addEventListener('message', function (e) {
             left.stripping = false;
             left.cleanSince = null;
             left.activeBackup = null;
+            left.activeVariantUrl = null;
+            // Same for the sequence state: coming back the player is a new session, and an offset
+            // or a floor from the previous visit would be applied to numbers it never described.
+            left.seqOffset = 0;
+            left.seqLastHead = null;
+            left.seqInBreak = false;
+            left.seqSource = null;
+            left.seqBackupOffset = 0;
+            left.seqServedPdt = undefined;
+            left.seqServedNumber = undefined;
+            left.seqBlind = false;
         }
         return;
     }
@@ -1991,6 +2246,7 @@ self.addEventListener('message', function (e) {
             Object.keys(streamsByChannel).forEach(function (k) {
                 streamsByChannel[k].adActive = false;
                 streamsByChannel[k].activeBackup = null;
+                streamsByChannel[k].activeVariantUrl = null;
             });
             self.postMessage({ key: 'AdEnded', channel: 'simulation' });
         }
@@ -2053,6 +2309,7 @@ installFetchHook();
                         adSignifier: Config.AdSignifier,
                         backupPlayerTypes: Config.BackupPlayerTypes.slice(),
                         stripAdSegments: Config.StripAdSegments,
+                        renumberSequence: Config.RenumberSequence !== false,
                         forcePlayerType: !!Config.ForceAccessTokenPlayerType,
                         adEndGraceMs: Math.max(0, Config.AdEndGraceSeconds * 1000),
                         simulatedAdDepth: 0,
