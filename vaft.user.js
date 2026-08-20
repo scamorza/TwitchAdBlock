@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      2.0.4
+// @version      2.0.5
 // @description  Twitch ad blocking
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -72,8 +72,8 @@
         // never comes back, and each break loses (gap x segment duration) of video. Turn off only
         // to compare against the old behaviour.
         RenumberSequence: true,
-        // OFF: where a new player session buys a pre-roll, the end-of-break reload buys another ad,
-        // which ends, which reloads again. Pause/play is used instead and resyncs fine.
+        // OFF: the reload buys another pre-roll, which ends, which reloads again. Off, the break
+        // ends without touching the player at all -- RenumberSequence has already re-anchored it.
         ReloadPlayerAfterAd: false,
         // Grace before declaring a break over, for pods where markers vanish briefly. Costs its own
         // duration in stalled video; raise only if the log shows 'ad markers returned after Nms'.
@@ -144,6 +144,9 @@
         // when the break ends. OFF makes stripping the final answer again.
         StepDownCodecInsteadOfStripping: true,
 
+        // Reuse what the React tree walk found until the player is rebuilt. OFF walks it every call.
+        CachePlayerLookup: true,
+
         // -- diagnostics ---------------------------------------------------------------------
         ShowBanner: true,
         // 'debug' | 'info' | 'warn' | 'off'
@@ -191,7 +194,9 @@
         workers: [],
         playerAdEvent: null,
         gqlTokenMode: 'persisted',
-        counters: { breaks: 0, reloads: 0, backupFailures: 0, recoveries: 0, deadPlayers: 0 }
+        counters: { breaks: 0, reloads: 0, backupFailures: 0, recoveries: 0, deadPlayers: 0 },
+        // probeRealPreroll's in-flight calls, keyed by request id.
+        pendingProbes: new Map()
     };
 
     // Anything writing persistent state here also removes it: leaving the key behind when the
@@ -314,7 +319,25 @@
         return null;
     }
 
+    // The walk below is expensive, and what it finds changes only when the player is rebuilt --
+    // which detaches the <video>, so isConnected tells us the cached pair is still the live one.
+    let playerCache = null;
+
+    function playerCacheIsLive() {
+        if (!playerCache) { return false; }
+        try {
+            if (typeof playerCache.controller.setSrc !== 'function') { return false; }
+            const video = playerCache.player.getHTMLVideoElement?.();
+            return !!video && video.isConnected;
+        } catch {
+            return false;
+        }
+    }
+
     function getPlayer() {
+        if (Config.CachePlayerLookup !== false && playerCacheIsLive()) {
+            return playerCache;
+        }
         const rootNode = document.querySelector('#root');
         if (!rootNode) {
             return null;
@@ -335,7 +358,8 @@
             instance = instance.playerInstance;
         }
         const controller = findReactNode(reactRoot, (n) => n.setSrc && n.setInitialPlaybackSettings);
-        return instance && controller ? { player: instance, controller } : null;
+        playerCache = instance && controller ? { player: instance, controller } : null;
+        return playerCache;
     }
 
     // play() hands back a promise. Dropping it loses the difference between the browser refusing
@@ -632,6 +656,8 @@
                 isNewMediaPlayerInstance: true,
                 refreshAccessToken: Config.RefreshTokenOnReload
             });
+            // New instance: drop the cached one.
+            playerCache = null;
         } catch (err) {
             log('warn', 'setSrc failed: ' + err);
             return;
@@ -874,6 +900,7 @@
                 }
                 const previous = Navigation.channel;
                 Navigation.channel = next;
+                playerCache = null;
                 resetForChannelChange(previous, next, how);
             } catch (err) {
                 log('debug', 'navigation watch error: ' + err);
@@ -1395,6 +1422,7 @@ var adSegments = new Map();
 var pendingFetches = new Map();
 var lastReloadAt = 0;
 var onceMessages = new Map();
+var workerRealFetch = null;
 
 // The reply must carry no codec configuration at all, because we never learn which codec the
 // SourceBuffer was opened with. This used to be a one-frame mp4 carrying an avc1 sample
@@ -1620,6 +1648,16 @@ function hasAdMarkers(text) {
     return text.indexOf(CONFIG.adSignifier) >= 0;
 }
 
+// Same predicate stripAds uses, counted rather than acted on.
+function countAdSegments(text) {
+    var lines = text.replace(/\\r/g, '').split('\\n');
+    var n = 0;
+    for (var i = 0; i < lines.length - 1; i++) {
+        if (lines[i].indexOf('#EXTINF') === 0 && lines[i].indexOf(',live') < 0) { n++; }
+    }
+    return n;
+}
+
 // Removes ad segments and, while an ad is running, the low-latency prefetch hints -- a prefetched
 // ad segment would be displayed before we ever saw the playlist entry for it.
 function stripAds(text, stream) {
@@ -1758,7 +1796,6 @@ function searchPlayerTypes(stream, realFetch) {
         if (index >= CONFIG.backupPlayerTypes.length) {
             return Promise.resolve(null);
         }
-        var thisIndex = index;
         var playerType = CONFIG.backupPlayerTypes[index++];
         return tryPlayerType(stream, playerType, realFetch)
             .then(function (text) {
@@ -1767,12 +1804,6 @@ function searchPlayerTypes(stream, realFetch) {
                     // without it the only visible trace is the low resolution itself.
                     wlog('info', 'backup via ' + playerType + ' had ads at every rendition,' +
                         ' trying the next player type');
-                    return attempt();
-                }
-                // Depth pretends the earlier player types still have ads, so 3 forces the fall to
-                // autoplay -- on a 2k/4k channel, the codec-mismatch case.
-                if (CONFIG.simulatedAdDepth > 0 && thisIndex < CONFIG.simulatedAdDepth - 1) {
-                    wlog('debug', 'simulateAd: pretending ' + playerType + ' still has ads');
                     return attempt();
                 }
                 stream.activeBackup = playerType;
@@ -1808,6 +1839,100 @@ function findCleanPlaylist(stream, realFetch) {
             });
     }
     return searchPlayerTypes(stream, realFetch);
+}
+
+// -- probeRealPreroll ---------------------------------------------------------------------------
+// Debugging only. Fetches the channel under a token carrying none of our identity (random device
+// id, no Authorization, no Client-Integrity): a session Twitch has never seen is reliably served a
+// real stitched preroll, so marker detection and stripAds can be exercised on demand. The playlist
+// belongs to that session, so its MEDIA-SEQUENCE is not ours and the sequence ratchet is not tested.
+function randomDeviceId() {
+    var chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    var id = '';
+    for (var i = 0; i < 32; i++) { id += chars.charAt(Math.floor(Math.random() * chars.length)); }
+    return id;
+}
+
+function anonymousAccessToken(channel) {
+    var body = {
+        operationName: 'PlaybackAccessToken', query: TOKEN_QUERY,
+        variables: { isLive: true, login: channel, isVod: false, vodID: '', playerType: 'site', platform: 'web' }
+    };
+    return new Promise(function (resolve, reject) {
+        var id = Math.random().toString(36).substring(2, 15);
+        pendingFetches.set(id, { resolve: resolve, reject: reject });
+        self.postMessage({
+            key: 'FetchRequest',
+            value: { id: id, url: 'https://gql.twitch.tv/gql', options: { method: 'POST', body: JSON.stringify(body),
+                headers: { 'Client-ID': GQLState.clientId, 'X-Device-Id': randomDeviceId() } } }
+        });
+    }).then(function (response) {
+        if (response.status !== 200) { throw new Error('anonymous token request returned ' + response.status); }
+        return response.json();
+    }).then(function (json) {
+        var token = json && json.data && json.data.streamPlaybackAccessToken;
+        if (token) { return token; }
+        var reason = json && json.errors ? json.errors.map(function (e) { return e.message; }).join(', ') : 'no token in the response';
+        throw new Error('no token for a fresh anonymous session: ' + reason);
+    });
+}
+
+function workerSleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+// The preroll is not always there on the first fetch, so one session is polled.
+var PROBE_POLL_MS = 1000;
+var PROBE_TIMEOUT_MS = 40000;
+
+function pollForAdMarkers(mediaUrl, deadline) {
+    return workerRealFetch(mediaUrl).then(function (r) {
+        if (r.status !== 200) { throw new Error('anonymous media playlist returned ' + r.status); }
+        return r.text();
+    }).then(function (text) {
+        if (hasAdMarkers(text)) { return text; }
+        if (Date.now() >= deadline) { return null; }
+        return workerSleep(PROBE_POLL_MS).then(function () { return pollForAdMarkers(mediaUrl, deadline); });
+    });
+}
+
+function probeRealPreroll(channel) {
+    var stream = streamsByChannel[channel];
+    if (!stream || !stream.usherBase) {
+        return Promise.reject(new Error('channel "' + channel + '" is not tracked yet -- let the stream load first'));
+    }
+    var variantResolution = null;
+    return anonymousAccessToken(channel)
+        .then(function (token) { return workerRealFetch(buildUsherUrl(stream, token)); })
+        .then(function (response) {
+            if (response.status !== 200) { throw new Error('anonymous usher master returned ' + response.status); }
+            return response.text();
+        })
+        .then(function (masterText) {
+            var candidates = pickVariant(masterText, stream.currentVariant);
+            if (!candidates || !candidates.length) { throw new Error('anonymous master has no comparable variant'); }
+            variantResolution = candidates[0].resolution;
+            return pollForAdMarkers(candidates[0].url, Date.now() + PROBE_TIMEOUT_MS);
+        })
+        .then(function (text) {
+            // A clean view must never pass as a probe result.
+            if (!text) {
+                throw new Error('fresh anonymous session on ' + channel + ' stayed CLEAN for ' +
+                    (PROBE_TIMEOUT_MS / 1000) + 's -- no ad markers, nothing to probe. Twitch does not' +
+                    ' stitch every anonymous view; try again.');
+            }
+            var dateRange = text.match(/#EXT-X-DATERANGE:[^\\n]*CLASS="twitch-stitched-ad"[^\\n]*/);
+            var carried = countAdSegments(text);
+            var cacheBefore = adSegments.size;
+            stripAds(text, {});
+            return {
+                channel: channel,
+                stitched: true,
+                dateRange: dateRange ? dateRange[0] : null,
+                adSegmentsCarried: carried,
+                stripped: adSegments.size - cacheBefore,
+                variantResolution: variantResolution,
+                playlistText: text
+            };
+        });
 }
 
 function onMasterPlaylist(url, text) {
@@ -2075,32 +2200,6 @@ function onMediaPlaylist(url, text, realFetch) {
         stream.seqInBreak = false;
     }
 
-    // Waiting for a midroll on a particular channel is not a workable way to reach the interesting
-    // cases, the codec mismatch on a 2k/4k channel above all.
-    if (CONFIG.simulatedAdDepth > 0) {
-        if (!stream.adActive) {
-            stream.adActive = true;
-            wclearOnce('rungs:');
-            self.postMessage({ key: 'AdStarted', channel: stream.channel, isMidroll: true, simulated: true });
-        }
-        return findCleanPlaylist(stream, realFetch).then(function (clean) {
-            if (clean) {
-                self.postMessage({ key: 'AdBlocked', channel: stream.channel, playerType: clean.playerType, isMidroll: true, stripping: false, resolution: stream.servedResolution || null });
-                return clean.text;
-            }
-            // Falls through to stripping exactly like the real path, otherwise the simulation
-            // cannot exercise the branch that matters most on 2k/4k channels -- where no backup
-            // carries HEVC and stripping is the only thing left.
-            if (CONFIG.stripAdSegments) {
-                var strippedText = stripAds(text, stream);
-                self.postMessage({ key: 'AdBlocked', channel: stream.channel, playerType: null, isMidroll: true, stripping: true });
-                return strippedText;
-            }
-            wlogOnce('sim', 'warn', 'simulateAd: no clean playlist at depth ' + CONFIG.simulatedAdDepth);
-            return text;
-        });
-    }
-
     if (!hasAdMarkers(text)) {
         if (stream.adActive) {
             // Multi-ad pods drop the markers for a poll or two between videos, and calling that
@@ -2160,6 +2259,8 @@ function onMediaPlaylist(url, text, realFetch) {
 
 function installFetchHook() {
     var realFetch = self.fetch;
+    // probeRealPreroll runs off this call path and still needs the unhooked fetch.
+    workerRealFetch = realFetch;
     self.fetch = function (input, options) {
         if (typeof input !== 'string') {
             return realFetch.apply(this, arguments);
@@ -2204,7 +2305,7 @@ function installFetchHook() {
 var OUR_MESSAGE_KEYS = {
     UpdateDeviceId: 1, UpdateClientVersion: 1, UpdateClientSession: 1,
     UpdateIntegrity: 1, UpdateAuthorization: 1, PlayerReloaded: 1, FetchResponse: 1,
-    SimulateAd: 1, PreferVariant: 1, ChannelChanged: 1
+    ProbeRealPreroll: 1, PreferVariant: 1, ChannelChanged: 1
 };
 
 // Registered before Twitch's worker is loaded, so this listener runs first and can stop our own
@@ -2256,18 +2357,12 @@ self.addEventListener('message', function (e) {
     }
     if (data.key === 'UpdateAuthorization') { GQLState.authorization = data.value; return; }
     if (data.key === 'PlayerReloaded') { lastReloadAt = Date.now(); return; }
-    if (data.key === 'SimulateAd') {
-        CONFIG.simulatedAdDepth = data.value | 0;
-        wlog('warn', 'simulateAd depth set to ' + CONFIG.simulatedAdDepth + (CONFIG.simulatedAdDepth ? ' - forcing the ad path until set back to 0' : ' - back to real ad detection'));
-        if (!CONFIG.simulatedAdDepth) {
-            // Release the forced state so the next real break starts from a clean slate
-            Object.keys(streamsByChannel).forEach(function (k) {
-                streamsByChannel[k].adActive = false;
-                streamsByChannel[k].activeBackup = null;
-                streamsByChannel[k].activeVariantUrl = null;
-            });
-            self.postMessage({ key: 'AdEnded', channel: 'simulation' });
-        }
+    if (data.key === 'ProbeRealPreroll') {
+        probeRealPreroll(data.channel).then(function (result) {
+            self.postMessage({ key: 'ProbeRealPrerollResult', id: data.id, ok: true, result: result });
+        }, function (err) {
+            self.postMessage({ key: 'ProbeRealPrerollResult', id: data.id, ok: false, error: err && err.message ? err.message : String(err) });
+        });
         return;
     }
     if (data.key === 'FetchResponse') {
@@ -2330,7 +2425,6 @@ installFetchHook();
                         renumberSequence: Config.RenumberSequence !== false,
                         forcePlayerType: !!Config.ForceAccessTokenPlayerType,
                         adEndGraceMs: Math.max(0, Config.AdEndGraceSeconds * 1000),
-                        simulatedAdDepth: 0,
                         tokenMode: State.gqlTokenMode
                     },
                     gql: {
@@ -2410,10 +2504,15 @@ installFetchHook();
                             updateBanner();
                             if (Config.ReloadPlayerAfterAd) {
                                 reloadPlayer();
-                            } else {
-                                pauseResumePlayer();
                             }
                             break;
+                        case 'ProbeRealPrerollResult': {
+                            const pending = State.pendingProbes.get(data.id);
+                            if (!pending) { break; }
+                            State.pendingProbes.delete(data.id);
+                            if (data.ok) { pending.resolve(data.result); } else { pending.reject(new Error(data.error)); }
+                            break;
+                        }
                         default:
                             break;
                     }
@@ -2474,15 +2573,35 @@ installFetchHook();
             return OverlayAds.buffer.slice();
         },
         overlayLayout: describeOverlayLayout,
-        // Depth picks how far down BackupPlayerTypes to fall: 1 takes the first that works, 3
-        // forces it to autoplay, the codec-mismatch case on a 2k/4k channel. 0 turns it off.
-        simulateAd(depth) {
-            const value = Math.max(0, depth | 0);
-            postToWorkers({ key: 'SimulateAd', value });
-            log('info', value
-                ? 'simulating an ad break at depth ' + value + ' - call window.vaft2.simulateAd(0) to stop'
-                : 'simulation off');
-            return value;
+        // Debugging only. Asks the worker to fetch this channel as a session Twitch has never seen.
+        probeRealPreroll() {
+            const channel = Navigation.channel;
+            if (!channel) {
+                const err = new Error('probeRealPreroll: no channel page open');
+                console.error('[VAFT2] ' + err.message);
+                return Promise.reject(err);
+            }
+            const worker = State.workers[State.workers.length - 1];
+            if (!worker) {
+                const err = new Error('probeRealPreroll: no player worker yet -- let the stream load first');
+                console.error('[VAFT2] ' + err.message);
+                return Promise.reject(err);
+            }
+            const id = Math.random().toString(36).slice(2);
+            log('info', 'probeRealPreroll: fetching ' + channel + ' as a fresh anonymous session...');
+            return new Promise((resolve, reject) => {
+                State.pendingProbes.set(id, { resolve, reject });
+                worker.postMessage({ key: 'ProbeRealPreroll', id, channel });
+            }).then((result) => {
+                log('info', 'probeRealPreroll: STITCHED -- ' + result.adSegmentsCarried +
+                    ' ad segment(s) carried, ' + result.stripped + ' registered for stripping, variant ' +
+                    result.variantResolution);
+                return result;
+            }, (err) => {
+                // Never let a failure read as success at the console.
+                console.error('[VAFT2] probeRealPreroll FAILED: ' + err.message);
+                throw err;
+            });
         },
         setLogLevel(level) {
             if (!(level in LEVELS)) {
