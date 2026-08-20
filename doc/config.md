@@ -17,7 +17,7 @@ to do anything.
 | `BackupPlayerTypes` | `['mobile_feed','popout','autoplay']` | Order in which a clean stream is looked for. Exemption is decided on the pair `playerType` + `platform`, the only two client-controlled fields reaching the signed token: `mobile_feed` asked as `android` is both ad-free and uncapped (1080p on avc, 1440p `hev1` on HEVC), so a break costs no rendition change. `popout` is the full-quality second chance — each request is its own ad auction, so it often comes back clean. `autoplay` is ad-free too, but capped at 640x360. | Reorder only with measurements. Dropping `autoplay` means some breaks have no backup at all and fall to stripping. |
 | `ForceAccessTokenPlayerType` | `'popout'` | Rewrites the player type on the access-token request. Also strips `parent_domains`, which is what stops embed-shaped fake ads. | Setting it empty disables the rewrite and brings those back. |
 | `StripAdSegments` | `true` | With no clean backup, ad segments are answered with an empty body instead of being served. | Off means ads play. Only useful to confirm a break is genuinely unavoidable. |
-| `ReloadPlayerAfterAd` | `false` | Rebuild the player when the break ends instead of pause/play. | Leave off. Where a new player session buys a pre-roll, the reload buys another ad, which ends, which reloads again. |
+| `ReloadPlayerAfterAd` | `false` | Rebuild the player when the break ends. Off, the exit does not touch the player at all: `RenumberSequence` re-anchors the served numbering before it fires, and a routine pause/play cost 1.0-1.2 s of silence for nothing. | Leave off. Where a new player session buys a pre-roll, the reload buys another ad, which ends, which reloads again. A genuinely stuck player is still caught by `RecoverBlockedPlayback` and the stall backstop. |
 | `AdEndGraceSeconds` | `0` | Wait before declaring a break over, for pods where markers vanish briefly. | Raise only if the log shows `ad markers returned after Nms`. Costs its own duration in stalled video. |
 | `ReloadCooldownSeconds` | `90` | Below this gap, a second reload degrades to pause/play. | Lower only if reloads are genuinely settling breaks and you want them sooner. |
 | `RefreshTokenOnReload` | `true` | Ask for a fresh access token when rebuilding the player. | First thing to turn off if a reload loop reappears. |
@@ -47,6 +47,12 @@ machinery never sees them.
 |---|---|---|---|
 | `PinHighestQuality` | `true` | Writes Twitch's own `video-quality-highest-available`. | Off if you want Twitch's automatic selection. It does **not** prevent the background downscale — measured: quality pinned, still fell to 360p on schedule. `HideVisibility` is what stops that. |
 | `StepDownCodecInsteadOfStripping` | `true` | On reaching stripping, drops to the best rung of a different codec so the backup search has candidates. Costs about a second of rebuffer and one rung, both given back when the break ends. | Off makes stripping the final answer again: the picture freezes for the whole break. Only relevant where the ladder mixes codecs — on an all-AVC channel it never fires. |
+
+## Performance
+
+| Option | Default | What it does | When to change |
+|---|---|---|---|
+| `CachePlayerLookup` | `true` | Reuses the player and controller found by the React tree walk until the player is rebuilt, tested in O(1) on whether the `<video>` is still attached. That walk is 98.5% of the script's main-thread cost. | Off only if a stale instance is suspected: it makes `getPlayer()` walk the tree again every call, up to four full walks a second. |
 
 ## Recovery
 

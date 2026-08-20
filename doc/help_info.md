@@ -55,8 +55,8 @@ No arguments. Returns the full state, read at the moment of the call.
 No arguments. Reprints the list of callable methods, the same block shown on load.
 
 The list comes from `Object.keys(window.vaft2)`, so it cannot drift from the code — and for the same
-reason it knows nothing about arguments: it prints `setLogLevel()` and `simulateAd()` with empty
-parentheses though both require one.
+reason it knows nothing about arguments: it prints `setLogLevel()` with empty parentheses though it
+requires one.
 
 ---
 
@@ -80,25 +80,13 @@ the stand-down when another ad blocker already claimed the page.
 
 ---
 
-## `simulateAd(depth)`
+## `probeRealPreroll()`
 
-**Required argument**, an integer. Forces the ad path with no real break, so the interesting cases
-can be reached on demand.
+For debugging only — you probably don't need it.
 
-| value | effect |
-|---|---|
-| `0` | off |
-| `1` | takes the first backup `playerType` that works |
-| `2` | pretends the first still has ads, so it falls to the second |
-| `3` | pretends they are all busy, all the way down to `autoplay` |
-
-Depth works by pretending the earlier player types are still serving ads. `3` is the one that matters
-on a 2k/4k channel: `autoplay`'s ladder carries a different codec from the one playing, which is the
-case where no backup is usable and only stripping is left.
-
-Negative values clamp to `0`, and the number is truncated to an integer.
-
-It stays on until `simulateAd(0)`: it does not expire on its own and it survives real breaks.
+No arguments, returns a promise. Fetches the current channel as a fresh anonymous session, which
+Twitch reliably serves a real stitched pre-roll, and runs marker detection and stripping against it.
+Rejects if that session comes back clean. One-shot: nothing is left on afterwards.
 
 ---
 
