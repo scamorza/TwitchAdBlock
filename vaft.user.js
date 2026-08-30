@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      2.0.5
+// @version      2.1.0
 // @description  Twitch ad blocking
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -56,45 +56,60 @@
         // -- ad blocking ---------------------------------------------------------------------
         BlockAds: true,
         AdSignifier: 'stitched',
-        // In order. Server-side ads are decided on the pair playerType + platform, the only two
-        // client-controlled fields that reach the signed token. mobile_feed asked as android is the
-        // one combination that is both ad-free and uncapped: 1080p on avc, 1440p hev1 on HEVC, so a
-        // break costs no rendition change at all.
-        // popout sits second as the full-quality second chance: each request is its own ad auction
-        // and it comes back clean about four times in ten, which is worth one round-trip on the
-        // rare path where mobile_feed fails. autoplay is last and ad-free too, but capped at 640x360.
+        // Tried in order. mobile_feed (as android) is ad-free and uncapped; popout is a second
+        // chance at full quality, clean ~4 times in 10; autoplay is ad-free but capped at 640x360.
         BackupPlayerTypes: ['mobile_feed', 'popout', 'autoplay'],
         // Also strips parent_domains, which is what stops the embed-shaped fake ads.
         ForceAccessTokenPlayerType: 'popout',
         StripAdSegments: true,
-        // Renumbers the served playlist onto the numbering the player already believes in. Without
-        // it the gap between the two sessions grows by one break's worth of segments every time and
-        // never comes back, and each break loses (gap x segment duration) of video. Turn off only
-        // to compare against the old behaviour.
+        // Renumbers the served playlist onto the numbering the player already believes in, or the
+        // gap between the two sessions grows by a break's worth every time and never comes back.
         RenumberSequence: true,
-        // OFF: the reload buys another pre-roll, which ends, which reloads again. Off, the break
-        // ends without touching the player at all -- RenumberSequence has already re-anchored it.
-        ReloadPlayerAfterAd: false,
-        // Grace before declaring a break over, for pods where markers vanish briefly. Costs its own
-        // duration in stalled video; raise only if the log shows 'ad markers returned after Nms'.
-        AdEndGraceSeconds: 0,
-        // Loop guard: a second reload inside this window degrades to pause/play.
+        // Carries the original's ad DATERANGEs onto what we serve, so the player re-arms its own
+        // defence during the break (see carryAdMarkers). Turn off to go back to the older
+        // behaviour, where the player crosses the seam without knowing there was a break.
+        CarryAdMarkers: true,
+        // Holds the MEDIA-LIVE gap continuous across the seam and walks it back to the true value
+        // one segment at a time (see liveGapServe). Turn off to compare against the older
+        // behaviour, where the whole step arrived at once.
+        HoldLiveGap: true,
+        // Every segment the player fetches passes our worker hook, and we know the number we gave
+        // it: any request that is not (last + 1) is a splice we caused.
+        TraceContinuity: true,
+        // Loop guard: a second reload inside this window degrades to pause/play -- a reload that
+        // settled nothing is a genuinely stuck player, not a routine exit.
         ReloadCooldownSeconds: 90,
+        // The backup's URLs are new to the CDN edge, so its first segment cost 1.051s of ttfb
+        // against the usual 0.10 -- enough to stall. We pull its start as soon as we adopt it.
+        WarmBackupSegments: true,
+        // Moving the playhead is the only way to cut latency without consuming buffer: left alone
+        // the player only speeds up to 1.03x, which consumes more than it receives.
+        // The guards below matter more than the jump: firing while the player rebuilds after a
+        // stall destroys the defence it is building.
+        LatencyTrim: true,
+        // Only trim above this much cushion: below it there is nothing to reclaim.
+        LatencyTrimThresholdSeconds: 4.0,
+        // 2.5 and not less: the player floors itself at 1s in low latency and 2-3s after a stall,
+        // so leaving it 1.2 handed it back already below its own target.
+        LatencyTrimResidualSeconds: 2.5,
+        // It has to stay high for a while: the cushion swings ~0.5s every segment (sawtooth from
+        // chunked delivery) and trimming on an isolated peak would be trimming on noise.
+        LatencyTrimPersistenceSeconds: 20,
+        // How long to let the player heal after a stall before touching its cushion.
+        LatencyTrimStallGraceSeconds: 120,
+        LatencyTrimCooldownSeconds: 60,
         // Prime suspect in that loop; first thing to try if it reappears.
         RefreshTokenOnReload: true,
 
         // -- overlay / squeezeback ads -------------------------------------------------------
-        // Nothing is stitched into the segments and the stream never stops: the picture is shrunk,
-        // or an ad pod plays above chat. Detection only -- DeclineClientSideAds stops these, and
-        // this stays on to catch one that gets through anyway.
+        // Nothing is stitched in and the stream never stops: the picture shrinks, or a pod plays
+        // above chat. Detection only; DeclineClientSideAds is what stops them.
         WatchOverlayAds: true,
 
         // -- client-side (display) ads --------------------------------------------------------
-        // Decided in the browser, so none of the playlist machinery above ever sees them. Twitch's
-        // ad manager drains its queue as:
+        // Twitch's ad manager drains its queue as:
         //     this.declineReason ? cmd.decline(this.declineReason) : this.isReady && cmd.fn()
-        // cmd.fn() holds the fetch to the ad edge, so setting declineReason stops the request that
-        // would have produced the creative -- upstream of the container, not around it.
+        // cmd.fn() holds the fetch to the ad edge, so declineReason stops the request itself.
         DeclineClientSideAds: true,
         // From Twitch's own enum: the reason is passed to each declined command and tracked from
         // there, so an invented string would stand out.
@@ -103,10 +118,8 @@
         AdDeclineAttempts: 240,
 
         // -- page visibility -----------------------------------------------------------------
-        // Always reports the page as visible: no pause of a backgrounded player mid-ad, and no
-        // background downscale (a hidden tab fell 720p60 -> 360p30 in ~2 min without it). Cost:
-        // player-core's onSinkStop only touches the player when the document is not hidden, so a
-        // stalled sink now reaches a local pause() -- the only reason RecoverBlockedPlayback exists.
+        // Always reports the page visible: stops the background downscale (720p60 -> 360p30 in ~2
+        // min). Cost: a stalled sink now reaches a local pause(), which RecoverBlockedPlayback undoes.
         HideVisibility: true,
         // Minimising stops the media sink, and with document.hidden forced false player-core pauses
         // in the branch that emits no event at all, so nothing else notices.
@@ -114,28 +127,20 @@
 
         // -- quality -------------------------------------------------------------------------
         // Twitch's own 'video-quality-highest-available'. Does NOT prevent the background downscale
-        // despite vaft's similarly-named option claiming so -- measured: with quality pinned it
-        // still fell to 360p on schedule. HideVisibility is what stops that.
+        // despite vaft's similarly-named option claiming so: HideVisibility is what stops that.
         PinHighestQuality: true,
 
         // -- recovery ------------------------------------------------------------------------
-        // onSinkStop has three exits: unmuted -> mute and replay (AudioBlocked); muted -> pause +
-        // PlaybackBlocked with no retry; else a silent pause. Only the middle one strands the
-        // stream with nobody coming, so it is the only one acted on.
+        // onSinkStop has three exits; only the muted one (pause + PlaybackBlocked, no retry) strands
+        // the stream with nobody coming, so it is the only one acted on.
         RecoverBlockedPlayback: true,
         ResumeVerifyDelayMs: 2000,
         ResumeVerifyAttempts: 2,
 
-        // OFF: player-core runs its own playback monitor on the same condition and a second loop
-        // fights it. Enable only if the player dies outright and stays dead.
-        StallBackstop: false,
-        StallBackstopSeconds: 20,
 
-        // A decode error tears the media element down and player-core does not retry: it renders
-        // "Errore #3000" and waits for a click. Nothing else in here noticed -- the player sat
-        // dead for six minutes with not one line in the log -- so this is the backstop for the
-        // player being not merely stalled but destroyed. Held for a while before acting, because
-        // the same signature appears for a second or two during any ordinary load.
+        // A decode error tears the media element down and player-core does not retry -- it renders
+        // "Errore #3000" and waits for a click. Held before acting: the same signature appears for
+        // a second or two during any ordinary load.
         RecoverDeadPlayer: true,
         DeadPlayerSeconds: 12,
 
@@ -144,7 +149,8 @@
         // when the break ends. OFF makes stripping the final answer again.
         StepDownCodecInsteadOfStripping: true,
 
-        // Reuse what the React tree walk found until the player is rebuilt. OFF walks it every call.
+        // Reuse the player and controller found by the React tree walk until the player is
+        // rebuilt. OFF walks the tree on every getPlayer() -- up to four full walks a second.
         CachePlayerLookup: true,
 
         // -- diagnostics ---------------------------------------------------------------------
@@ -194,8 +200,8 @@
         workers: [],
         playerAdEvent: null,
         gqlTokenMode: 'persisted',
-        counters: { breaks: 0, reloads: 0, backupFailures: 0, recoveries: 0, deadPlayers: 0 },
-        // probeRealPreroll's in-flight calls, keyed by request id.
+        counters: { breaks: 0, reloads: 0, backupFailures: 0, recoveries: 0, deadPlayers: 0, continuityBreaks: 0 },
+        // probeRealPreroll's in-flight calls, keyed by request id. Nothing survives past resolution.
         pendingProbes: new Map()
     };
 
@@ -319,8 +325,9 @@
         return null;
     }
 
-    // The walk below is expensive, and what it finds changes only when the player is rebuilt --
-    // which detaches the <video>, so isConnected tells us the cached pair is still the live one.
+    // The walk below is the script's whole main-thread cost: 98.5% of it, claim 052. The instances
+    // it finds change only when the player is rebuilt, and the <video> the player owns is detached
+    // when that happens -- so isConnected is an O(1) test for "still the live pair".
     let playerCache = null;
 
     function playerCacheIsLive() {
@@ -488,6 +495,258 @@
         return base || '?';
     }
 
+    // A hole in buffered is the defect the viewer sees: one range means clean. Sampled twice
+    // because the first segments after a swap have not arrived when the break is declared over.
+    function readBufferedRanges() {
+        const video = document.getElementsByTagName('video')[0];
+        if (!video || !video.buffered) { return null; }
+        const out = [];
+        for (let i = 0; i < video.buffered.length; i++) {
+            out.push({ start: video.buffered.start(i), end: video.buffered.end(i) });
+        }
+        return { at: video.currentTime, ranges: out, ready: video.readyState,
+                 head: out.length ? out[0].start : null, tail: out.length ? out[out.length - 1].end : null };
+    }
+
+    function describeBuffered(sample) {
+        if (!sample || !sample.ranges.length) { return 'no buffer'; }
+        if (sample.ranges.length === 1) { return 'contiguous'; }
+        const holes = [];
+        for (let i = 1; i < sample.ranges.length; i++) {
+            holes.push((sample.ranges[i].start - sample.ranges[i - 1].end).toFixed(3) + 's at ' +
+                sample.ranges[i - 1].end.toFixed(3));
+        }
+        return sample.ranges.length + ' ranges, hole(s) ' + holes.join(', ');
+    }
+
+    // Stall census. MEASUREMENT ONLY: it never touches the player.
+    // Three samples and the buffer head alongside the playhead, because a stall and a rebuilt media
+    // element look identical on currentTime alone: if the buffer head jumps back too the timeline
+    // was rebuilt. Both counts are kept -- stalls near an exit and stalls per minute of clear play
+    // -- since the question is whether they cluster after a break.
+    const STALL_WINDOW_MS = 30000;
+    const Stalls = { seen: 0, nearExit: 0, clear: 0, during: 0, exits: 0, lastExitAt: null,
+                     clearMs: 0, prevAt: null, prevCt: null, prevEl: null, frozen: 0, inStall: false,
+                     aheadAtFreeze: null, latAtFreeze: null, lastStallAt: null };
+
+    // The real latency, asked of the player instead of scraped from the panel (claim 083: the
+    // facade exposes getLiveLatency). One read, and getPlayer is already cached.
+    function readLiveLatency() {
+        try {
+            const v = getPlayer()?.player?.getLiveLatency?.();
+            return (typeof v === 'number' && isFinite(v)) ? v : null;
+        } catch (err) {
+            return null;
+        }
+    }
+
+    const Trim = { above: 0, cuts: 0, lastAt: 0, lastCut: null , lastStarveAt: null };
+
+    // Trims the excess cushion by moving the playhead forward into buffer already downloaded.
+    // Measured live on 27/08 on a natural degradation: latency 3.666 -> 1.673 in three seconds,
+    // cushion 3.560 -> 1.452, no pause, readyState 4, playbackRate 1.
+    function startLatencyTrim() {
+        if (!Config.LatencyTrim) { return; }
+        log('info', 'latency trim on: moves the playhead forward when the cushion stays above ' +
+            Config.LatencyTrimThresholdSeconds + 's for ' +
+            Config.LatencyTrimPersistenceSeconds + 's, leaving ' +
+            Config.LatencyTrimResidualSeconds + 's, at most once every ' +
+            Config.LatencyTrimCooldownSeconds + 's');
+        setInterval(() => {
+            try {
+                const el = document.getElementsByTagName('video')[0];
+                // Starvation is recorded before any early return: the guards below bail out first,
+                // and detecting after them would never see the state we want to protect.
+                if (el && el.buffered && el.buffered.length) {
+                    var tail = el.buffered.end(el.buffered.length - 1);
+                    if (el.readyState < 3 || (tail - el.currentTime) < 0.15) {
+                        Trim.lastStarveAt = Date.now();
+                    }
+                }
+                if (!el || el.paused || el.seeking || el.readyState < 4 || State.adActive ||
+                    !el.buffered || !el.buffered.length) {
+                    Trim.above = 0; return;
+                }
+                // Never while the player is already chasing: if it is speeding up it is working
+                // its own way back, and the jump pulls the ground from under it. Measured: with the
+                // trim off the player sits at 1.03x for whole minutes without ever getting there.
+                if (el.playbackRate > 1.001) { Trim.above = 0; return; }
+                // Never right after a stall: the high cushion there is not excess, it is the
+                // defence the player is rebuilding. The signal cannot be our own census, which
+                // undercounts -- starvation is observed here, on the same tick.
+                if (Trim.lastStarveAt && (Date.now() - Trim.lastStarveAt) <
+                    Config.LatencyTrimStallGraceSeconds * 1000) { Trim.above = 0; return; }
+                const be = el.buffered.end(el.buffered.length - 1);
+                const cushion = be - el.currentTime;
+                if (!(cushion > Config.LatencyTrimThresholdSeconds)) { Trim.above = 0; return; }
+                Trim.above += 1;
+                if (Trim.above < Config.LatencyTrimPersistenceSeconds) { return; }
+                const now = Date.now();
+                if (Trim.lastAt && (now - Trim.lastAt) < Config.LatencyTrimCooldownSeconds * 1000) { return; }
+                const target = be - Config.LatencyTrimResidualSeconds;
+                const jump = target - el.currentTime;
+                // A cut of a few tenths is not worth the jump: wait until it is.
+                if (jump < 0.5) { Trim.above = 0; return; }
+                Trim.above = 0; Trim.lastAt = now; Trim.cuts += 1;
+                Trim.lastCut = { at: new Date().toISOString(), cushion: Math.round(cushion * 100) / 100,
+                                 jump: Math.round(jump * 100) / 100 };
+                log('warn', '[rate ' + el.playbackRate.toFixed(3) + ', rs ' + el.readyState +
+                    ', last starve ' + (Trim.lastStarveAt ? Math.round((now - Trim.lastStarveAt) / 1000) + 's ago' : 'never') +
+                    '] cushion stuck at ' + cushion.toFixed(2) + 's for ' +
+                    Config.LatencyTrimPersistenceSeconds + 's -- moving the playhead forward ' +
+                    jump.toFixed(2) + 's (no reload)');
+                el.currentTime = target;
+            } catch (err) { log('debug', 'latency trim error: ' + err); }
+        }, 1000);
+    }
+
+    function startStallCensus() {
+        if (!Config.TraceContinuity) { return; }
+        setInterval(() => {
+            try {
+                const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+                const gap = Stalls.prevAt === null ? 0 : now - Stalls.prevAt;
+                const el = document.getElementsByTagName('video')[0] || null;
+                const prevEl = Stalls.prevEl, prevCt = Stalls.prevCt;
+                Stalls.prevAt = now;
+                Stalls.prevEl = el;
+                Stalls.prevCt = el ? el.currentTime : null;
+                // A background tab throttles timers, and a late sample describes no interval at
+                // all: it cannot be read as a stall, and its clear seconds must not be counted
+                // either, or the denominator grows while the numerator does not.
+                if (!el || el !== prevEl || prevCt === null || gap > 2000) {
+                    Stalls.frozen = 0; Stalls.inStall = false; return;
+                }
+                // When it starves the player PAUSES the element, so bailing out on el.paused would
+                // skip the stalls themselves. Starvation is told from a user pause by two things
+                // together: buffer end against the playhead, and readyState down to 2.
+                const tail = el.buffered.length ? el.buffered.end(el.buffered.length - 1) : null;
+                const starving = el.paused && el.readyState <= 2 &&
+                    tail !== null && (tail - el.currentTime) < 0.5;
+                if (el.seeking || (el.paused && !starving)) {
+                    Stalls.frozen = 0; Stalls.inStall = false; return;
+                }
+                const nearExit = Stalls.lastExitAt !== null && (now - Stalls.lastExitAt) <= STALL_WINDOW_MS;
+                if (!State.adActive && !nearExit) { Stalls.clearMs += gap; }
+                if (el.currentTime - prevCt > 0.05) { Stalls.frozen = 0; Stalls.inStall = false; return; }
+                // Two consecutive frozen samples, not one: at 500ms a single frozen sample is also
+                // just a long frame. And it counts on the edge, not repeatedly: a 10s stall is ONE
+                // stall.
+                Stalls.frozen++;
+                // Read on the FIRST frozen sample, not at the declaration: by frozen>=2 the refill
+                // has begun, and the trace reported 1.572s of buffer where there were 0.100.
+                if (Stalls.frozen === 1) {
+                    Stalls.lastStallAt = Date.now();
+                    const atFreeze = readBufferedRanges();
+                    Stalls.aheadAtFreeze = (atFreeze && atFreeze.tail !== null)
+                        ? atFreeze.tail - atFreeze.at : null;
+                    Stalls.latAtFreeze = readLiveLatency();
+                }
+                if (Stalls.frozen < 2 || Stalls.inStall) { return; }
+                Stalls.inStall = true;
+                Stalls.seen++;
+                let where;
+                if (State.adActive) { Stalls.during++; where = 'during a break'; }
+                else if (nearExit) {
+                    Stalls.nearExit++;
+                    where = ((now - Stalls.lastExitAt) / 1000).toFixed(1) + 's after a break exit';
+                } else { Stalls.clear++; where = 'in clear play'; }
+                const ahead = Stalls.aheadAtFreeze;
+                const lat = Stalls.latAtFreeze;
+                log('warn', '[TRACE] stall #' + Stalls.seen + ' at ' + el.currentTime.toFixed(3) +
+                    (ahead === null ? '' : ', buffer ' + ahead.toFixed(3) + 's ahead') +
+                    (lat === null ? '' : ', latency ' + lat.toFixed(2) + 's') + ', ' + where +
+                    ' -- ' + Stalls.nearExit + ' within ' + (STALL_WINDOW_MS / 1000) + 's of an exit over ' +
+                    Stalls.exits + ' exit(s), ' + Stalls.clear + ' in ' +
+                    (Stalls.clearMs / 60000).toFixed(1) + ' min of clear play' +
+                    (Stalls.during ? ', ' + Stalls.during + ' during a break' : ''));
+            } catch (err) {
+                log('debug', 'stall census error: ' + err);
+            }
+        }, 500);
+    }
+
+    function reportExitBuffer() {
+        // Read and cleared here, not at the bottom: the report has two early returns, and a value
+        // that survives an unmeasurable exit is later subtracted from ANOTHER break's depth,
+        // printing a delta that was never measured.
+        const depthAtBreak = State.depthAtBreak;
+        const latencyAtBreak = State.latencyAtBreak;
+        const latencyAtHandover = State.latencyAtHandover;
+        State.depthAtBreak = null;
+        State.latencyAtBreak = null;
+        State.latencyAtHandover = null;
+        // The two ends must belong to the same playback: a channel change between the samples once
+        // produced "STALLED -42.604s" while playback was perfectly smooth.
+        const el0 = document.getElementsByTagName('video')[0] || null;
+        const ch0 = Navigation.channel;
+        const s0 = readBufferedRanges();
+        // Elapsed time is MEASURED. setTimeout fires after "at least" N ms, never exactly N, and a
+        // playhead advancing 8.004s in 8.004s of wall clock, read as "+8.004 over 8", looks like an
+        // excess that is not there.
+        const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        const ground = () => {
+            const el = document.getElementsByTagName('video')[0] || null;
+            if (Navigation.channel !== ch0) { return 'the channel changed'; }
+            if (el !== el0) { return 'the player replaced its video element'; }
+            if (State.adActive) { return 'another ad started'; }
+            return null;
+        };
+        const sign = n => (n >= 0 ? '+' : '') + n.toFixed(3) + 's';
+        setTimeout(() => {
+            const moved1 = ground();
+            const s1 = readBufferedRanges();
+            setTimeout(() => {
+                const moved = moved1 || ground();
+                if (moved) {
+                    log('info', '[TRACE] break exit not measurable -- ' + moved + ' while sampling');
+                    return;
+                }
+                const s2 = readBufferedRanges();
+                if (!s2 || !s1) { log('warn', '[TRACE] break exit: no player to sample'); return; }
+                const wall = ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0) / 1000;
+                const advanced = s2.at - s1.at;                    // over the last 6s
+                const jumped = s0 ? s2.at - s0.at : null;
+                const headMoved = (s0 && s0.head !== null && s2.head !== null) ? s2.head - s0.head : null;
+                // A timeline restart must be recognised BEFORE judging progress: if the timeline
+                // restarted between the two samples, "how far it advanced" means nothing.
+                const rebuilt = jumped !== null && headMoved !== null && jumped < -1 && headMoved < -1;
+                let verdict;
+                if (s2.ranges.length !== 1) { verdict = 'DEGRADED'; }
+                else if (rebuilt) { verdict = 'CLEAN (timeline rebuilt at the exit)'; }
+                else if (jumped !== null && jumped < -1) { verdict = 'DEGRADED (playhead seeked back)'; }
+                else if (advanced < 4) { verdict = 'STALLED'; }
+                else { verdict = 'CLEAN'; }
+                log(verdict.indexOf('CLEAN') === 0 ? 'info' : 'warn',
+                    '[TRACE] break exit ' + verdict + ' -- buffer ' + describeBuffered(s2) +
+                    ', playhead ' + sign(advanced) + ' over the last 6s' +
+                    (jumped === null ? '' : ', ' + sign(jumped) + ' in ' + wall.toFixed(3) + 's of wall clock') +
+                    (headMoved === null ? '' : ', buffer head ' + sign(headMoved)) +
+                    ', readyState ' + s2.ready +
+                    (function () {
+                        if (s2.tail === null) { return ''; }
+                        const depth = s2.tail - s2.at;
+                        if (typeof depthAtBreak !== 'number') { return ', depth ' + depth.toFixed(3) + 's'; }
+                        return ', depth ' + depthAtBreak.toFixed(3) + 's -> ' + depth.toFixed(3) +
+                            's (' + sign(depth - depthAtBreak) + ' across the break)';
+                    })() +
+                    (function () {
+                        const now = readLiveLatency();
+                        if (now === null) { return ''; }
+                        const mid = (typeof latencyAtHandover === 'number')
+                            ? latencyAtHandover.toFixed(2) + 's at the handover -> ' : '';
+                        if (typeof latencyAtBreak !== 'number') { return ', latency ' + mid + now.toFixed(2) + 's'; }
+                        return ', latency ' + latencyAtBreak.toFixed(2) + 's -> ' + mid + now.toFixed(2) +
+                            's (' + sign(now - latencyAtBreak) + ' across the break' +
+                            (typeof latencyAtHandover === 'number'
+                                ? ': ' + sign(latencyAtHandover - latencyAtBreak) + ' during, ' +
+                                  sign(now - latencyAtHandover) + ' after'
+                                : '') + ')';
+                    })());
+            }, 6000);
+        }, 2000);
+    }
+
     function describePlayback() {
         try {
             const player = getPlayer()?.player;
@@ -519,21 +778,12 @@
         }
     }
 
-    // Codec step-down, the escape hatch from stripping.
-    //
-    // On an hevc-source channel the ladder is one hevc rung and five avc transcodes, so a backup
-    // search that insists on the same codec has one candidate and a break reaching that rung has
-    // nowhere to go. Stepping down to the top avc rung unlocks the five that were always there.
-    //
-    // Must be the player's own setQuality, not a playlist swapped in underneath: handing an avc
-    // playlist to a pipeline opened for hevc stops playback dead, while setQuality rebuilds the
-    // pipeline. Measured on 1440p60 hevc: Buffering at 300ms, Playing again at 1000ms.
-    //
-    // It does NOT touch 'video-quality-highest-available' -- Twitch writes that from its own menu
-    // handler, which setQuality on the instance goes around -- so the pin survives a tab closed
-    // mid-break. wasAuto matters as much as the name: setQuality takes the player out of automatic,
-    // so restoring a name to someone on Auto would leave them quietly pinned to a rung they never
-    // chose.
+    // Codec step-down, the escape hatch from stripping. On an hevc-source channel a same-codec
+    // backup search has one candidate; stepping down to the top avc rung unlocks five.
+    // Must be the player's own setQuality: handing an avc playlist to a pipeline opened for hevc
+    // stops playback dead, while setQuality rebuilds it.
+    // wasAuto matters as much as the name -- setQuality leaves automatic mode, so restoring only the
+    // name would pin an Auto viewer to a rung they never chose.
     const QualityFallback = { originalName: null, wasAuto: false, active: false };
 
     function stepDownFromStrippedCodec() {
@@ -656,7 +906,6 @@
                 isNewMediaPlayerInstance: true,
                 refreshAccessToken: Config.RefreshTokenOnReload
             });
-            // New instance: drop the cached one.
             playerCache = null;
         } catch (err) {
             log('warn', 'setSrc failed: ' + err);
@@ -684,47 +933,7 @@
 
     // Coarse and off by default: player-core already recovers shallow underruns. The only gap
     // worth covering is a player frozen long enough that nobody is coming for it.
-    function startStallBackstop() {
-        if (!Config.StallBackstop) {
-            return;
-        }
-        let lastBufferedPosition = null;
-        let frozenSince = 0;
-        setInterval(() => {
-            try {
-                const found = getPlayer();
-                const player = found?.player;
-                if (!player?.core || player.isPaused?.() || State.adActive) {
-                    frozenSince = 0;
-                    return;
-                }
-                const buffered = player.core?.state?.bufferedPosition;
-                if (buffered === undefined) {
-                    return;
-                }
-                if (buffered !== lastBufferedPosition) {
-                    lastBufferedPosition = buffered;
-                    frozenSince = 0;
-                    return;
-                }
-                if (!frozenSince) {
-                    frozenSince = Date.now();
-                    return;
-                }
-                if (Date.now() - frozenSince >= Config.StallBackstopSeconds * 1000) {
-                    frozenSince = 0;
-                    log('warn', 'buffer frozen for ' + Config.StallBackstopSeconds + 's, nudging the player');
-                    pauseResumePlayer();
-                }
-            } catch (err) {
-                log('debug', 'stall backstop error: ' + err);
-            }
-        }, 2000);
-    }
-
-    // Separate from the stall backstop: that one watches a player alive but not advancing, and
-    // competes with player-core. This one watches for the player being gone, which player-core
-    // does not retry -- so there is nobody else to fight.
+    // The player is not stalled: it is gone outright, and player-core does not retry.
     function startDeadPlayerWatch() {
         if (!Config.RecoverDeadPlayer) {
             return;
@@ -796,19 +1005,13 @@
         overlay.style.display = State.adActive ? 'block' : 'none';
     }
 
-    // Twitch is a single-page app: switching channel replaces the stream without a reload, and the
-    // playlist that would report the end of the break stops being polled. Nothing expires on its
-    // own -- not the banner, and not the codec step-down, which otherwise keeps the viewer off
-    // automatic and aims the next backup search at the previous channel's ladder.
+    // Switching channel replaces the stream without a reload, and the playlist that would report
+    // the end of the break stops being polled. Nothing expires on its own.
     const Navigation = { channel: null, left: null };
 
     // A playlist response for the channel being left can land after the reset and repopulate it.
-    // Narrow on purpose: dropping anything that is not the current channel would also drop real
-    // breaks on embed players, where the location names no channel at all. A stale label costs less.
-    //
-    // left holds one channel, so A -> B -> C stops filtering A. Deliberate: the window is a single
-    // playlist round-trip, and two channel changes inside it are not reachable by hand. The reset
-    // has already cleared the state either way -- this only keeps a late message from undoing it.
+    // Narrow on purpose: dropping everything that is not the current channel would also drop real
+    // breaks on embed players, where the location names no channel at all.
     function messageIsStale(data) {
         const channel = data.channel && String(data.channel).toLowerCase();
         if (!channel || channel === 'simulation' || !Navigation.left) {
@@ -847,6 +1050,16 @@
         State.activeBackupPlayerType = null;
         State.strippingSegments = false;
         State.playerAdEvent = null;
+        // Buffer depth belongs to the playback that measured it: comparing it with another
+        // channel's is the same mistake as the "STALLED -42.604s" one.
+        State.depthAtBreak = null;
+        State.latencyAtBreak = null;
+        State.latencyAtHandover = null;
+        Stalls.lastExitAt = null;
+        Stalls.prevEl = null;
+        Stalls.prevCt = null;
+        Stalls.frozen = 0;
+        Stalls.inStall = false;
         clearOnce('blocking');
         clearOnce('leak');
 
@@ -878,12 +1091,10 @@
         updateBanner();
 
         // No pause/play and no reload: Twitch is already rebuilding the stream.
-        const from = previous || 'a non-channel page';
-        const to = next || 'a non-channel page';
         if (carried) {
-            log('info', 'left ' + from + ' mid-break -- state cleared for ' + to);
+            log('info', 'left the channel mid-break -- state cleared');
         } else {
-            log('debug', 'channel changed, ' + from + ' -> ' + to + ' (nothing carried) via ' + how);
+            log('debug', 'channel changed (nothing carried) via ' + how);
         }
     }
 
@@ -924,10 +1135,8 @@
         setInterval(() => onNavigate('poll'), 2000);
     }
 
-    // Detection keys on an effect no implementation can avoid -- the video getting smaller than
-    // its container -- and records into a rolling buffer, because by the time an occurrence is
-    // noticed the ad is over and the DOM is clean. pbyp state is context, not a trigger: watched
-    // during a live occurrence it stayed idle throughout.
+    // Keys on the one effect no implementation can avoid: the video getting smaller than its
+    // container. Recorded into a rolling buffer -- by the time it is noticed the DOM is clean.
     const OverlayAds = {
         pbypInstance: null,
         buffer: [],
@@ -1016,10 +1225,8 @@
             if (OverlayAds.buffer.length > OverlayAds.bufferLimit) {
                 OverlayAds.buffer.shift();
             }
-            // Iframe count is recorded but is NOT a trigger: it fired on every page load, because
-            // the baseline came from the first sample, before Twitch's ordinary iframes existed.
-            // Aspect equality is what separates a squeezeback from letterboxing -- without it every
-            // non-16:9 window looks like an ad.
+            // Iframe count is recorded but is NOT a trigger: it fired on every page load. Aspect
+            // equality is what separates a squeezeback from letterboxing.
             const sameAspect = sample.videoAspect !== null && sample.containerAspect !== null &&
                 Math.abs(sample.videoAspect - sample.containerAspect) <= sample.containerAspect * 0.05;
             const shrunk = sample.ratio !== null && sample.ratio < 0.9 && sameAspect;
@@ -1355,25 +1562,25 @@
             // Responses are matched by position, so the batch goes out without the mini-player
             // entries and their denials are spliced back at the indices they came from. Emptying
             // the body instead would take the real player's token down with it.
-            const indici = [];
-            const resto = [];
-            operations.forEach((op, i) => { (isPictureByPicture(op) ? indici : resto).push(i); });
-            log('debug', 'picture-by-picture batched with ' + resto.length + ' other operation(s)' +
-                ' -- denying position(s) ' + indici.join(',') + ' and passing the rest');
-            const magro = resto.map((i) => operations[i]);
-            const inviare = { ...init, body: JSON.stringify(magro) };
-            return realFetch('https://gql.twitch.tv/gql', inviare).then(async (response) => {
+            const denyAt = [];
+            const kept = [];
+            operations.forEach((op, i) => { (isPictureByPicture(op) ? denyAt : kept).push(i); });
+            log('debug', 'picture-by-picture batched with ' + kept.length + ' other operation(s)' +
+                ' -- denying position(s) ' + denyAt.join(',') + ' and passing the rest');
+            const trimmed = kept.map((i) => operations[i]);
+            const outgoing = { ...init, body: JSON.stringify(trimmed) };
+            return realFetch('https://gql.twitch.tv/gql', outgoing).then(async (response) => {
                 if (response.status !== 200) { return response; }
-                const risposte = await response.json();
-                const array = Array.isArray(risposte) ? risposte : [risposte];
-                const ricomposto = [];
+                const answers = await response.json();
+                const array = Array.isArray(answers) ? answers : [answers];
+                const recomposed = [];
                 let k = 0;
                 operations.forEach((op, i) => {
-                    ricomposto[i] = isPictureByPicture(op)
+                    recomposed[i] = isPictureByPicture(op)
                         ? { data: { streamPlaybackAccessToken: null, videoPlaybackAccessToken: null } }
                         : array[k++];
                 });
-                return new Response(JSON.stringify(ricomposto), {
+                return new Response(JSON.stringify(recomposed), {
                     status: 200, headers: { 'Content-Type': 'application/json' }
                 });
             }).catch((err) => {
@@ -1411,10 +1618,8 @@
 var CONFIG = VAFT2_INIT.config;
 var GQLState = VAFT2_INIT.gql;
 
-// Overrides stream.currentVariant when choosing a backup rendition. currentVariant is whatever the
-// player wants at this instant, and right after a codec step-down that is the bottom of the ladder
-// it is ramping up from -- aiming at it locked a whole break to 640x360. A backup swap hands the
-// player one fixed variant with no ladder left to climb, so the transient value cannot be undone.
+// Overrides stream.currentVariant when choosing a backup rendition: right after a codec step-down
+// that is the bottom of the ladder, and a backup swap leaves no ladder to climb back up.
 var preferredVariant = null;
 var streamsByChannel = Object.create(null);
 var streamsByPlaylistUrl = Object.create(null);
@@ -1424,11 +1629,9 @@ var lastReloadAt = 0;
 var onceMessages = new Map();
 var workerRealFetch = null;
 
-// The reply must carry no codec configuration at all, because we never learn which codec the
-// SourceBuffer was opened with. This used to be a one-frame mp4 carrying an avc1 sample
-// description: harmless on h264, fatal on hevc, where the decoder gets an H.264 track config and
-// the player dies with Errore #3000 and never comes back. Zero bytes is the only answer correct
-// for every codec -- MSE treats the append as a no-op, and the player still gets its 200.
+// Zero bytes, because we never learn which codec the SourceBuffer was opened with. A one-frame
+// mp4 with an avc1 sample description is harmless on h264 and fatal on hevc (Errore #3000).
+// MSE treats an empty append as a no-op and the player still gets its 200.
 function emptySegmentResponse() {
     return new Response(new ArrayBuffer(0), {
         status: 200,
@@ -1487,10 +1690,8 @@ function writeServerTime(text, serverTime) {
 }
 
 function gqlRequest(body) {
-    // An invented device id must never travel with the page's real Client-Integrity: that token is
-    // minted for one device, and the same token under another is what a replay looks like. The
-    // server burns it, and from then on the page's OWN requests fail their integrity check. The
-    // window is real -- Twitch's first token request of a page load carries no device id either.
+    // An invented device id must never travel with the page's real Client-Integrity: that looks
+    // like a replay, the server burns the token, and the page's own requests start failing.
     var inventedDeviceId = false;
     if (!GQLState.deviceId) {
         var chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -1530,10 +1731,10 @@ var TOKEN_QUERY = 'query PlaybackAccessToken($login: String!, $isLive: Boolean!,
     ' videoPlaybackAccessToken(id: $vodID, params: {platform: $platform, playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) { value signature }' +
     ' }';
 
-// Twitch's own client sends the full document, not this hash, so the hash is an optimisation we
-// are not entitled to assume keeps working. On the first refusal, switch for the session.
-// Player types that must be asked for as a mobile client. The platform is not cosmetic: the same
-// mobile_feed asked as web comes back stitched every time, so the exemption needs the pair.
+// Twitch's own client sends the full document, so the hash is an optimisation: on the first
+// refusal, switch for the session.
+// Player types that must be asked for as a mobile client -- the same mobile_feed asked as web comes
+// back stitched every time, so the exemption needs the pair.
 var PLATFORM_MOBILE = { autoplay: 1, mobile_feed: 1 };
 
 function requestAccessToken(channel, playerType) {
@@ -1689,6 +1890,38 @@ function stripAds(text, stream) {
     return lines.filter(function (l) { return l !== ''; }).join('\\n');
 }
 
+// On seeing the ad DATERANGEs the player leaves low latency and doubles its buffer target. The
+// backup never carries them, so without this it crosses the seam with half its own protection.
+// Content stays clean; only the markers are carried, with tracking URLs sanitised as in stripAds.
+
+function carryAdMarkers(origText, servedText) {
+    if (!CONFIG.carryAdMarkers) { return servedText; }
+    if (typeof servedText !== 'string' || typeof origText !== 'string') { return servedText; }
+    // Already present (the stripping path): do not duplicate them.
+    if (servedText.indexOf(CONFIG.adSignifier) >= 0) { return servedText; }
+    var lines = origText.replace(/\\r/g, '').split('\\n'), markers = [];
+    for (var i = 0; i < lines.length; i++) {
+        if (lines[i].indexOf('#EXT-X-DATERANGE:') !== 0) { continue; }
+        if (lines[i].indexOf(CONFIG.adSignifier) < 0) { continue; }
+        markers.push(lines[i]
+            .replace(/(X-TV-TWITCH-AD-URL=")[^"]*(")/g, '$1https://twitch.tv$2')
+            .replace(/(X-TV-TWITCH-AD-CLICK-TRACKING-URL=")[^"]*(")/g, '$1https://twitch.tv$2'));
+    }
+    if (!markers.length) { return servedText; }
+    // At the top, before the first segment: DATERANGEs belong in the header. If no insertion
+    // point is found the text is left as it is rather than inventing one.
+    var out = lines.length ? servedText.replace(/\\r/g, '').split('\\n') : null;
+    if (!out) { return servedText; }
+    var at = -1;
+    for (var j = 0; j < out.length; j++) {
+        var r = out[j];
+        if (r.indexOf('#EXT-X-PROGRAM-DATE-TIME:') === 0 || r.indexOf('#EXTINF') === 0 ||
+            r.indexOf('#EXT-X-MAP') === 0) { at = j; break; }
+    }
+    if (at < 0) { return servedText; }
+    return out.slice(0, at).concat(markers, out.slice(at)).join('\\n');
+}
+
 // A master only changes when the stream restarts, but fetching one costs a GQL token round-trip
 // bridged through the page plus an usher request. Uncached, every playlist poll during a break
 // repeated that for every player type: up to nine round-trips every couple of seconds.
@@ -1724,16 +1957,11 @@ function tryPlayerType(stream, playerType, realFetch) {
                 candidates.map(function (v) { return v.resolution; }).join(', ') +
                 ' -- aiming at ' + ((want && want.resolution) || 'unknown') +
                 (preferredVariant ? ' (asked for by the page)' : ' (what the player is on)'));
-            // First clean rung wins. A lower rendition beats a frozen picture, and the viewer gets
-            // their quality back when the break ends.
-            // Stay on the rendition this break picked. Only the player type was pinned, so every
-            // poll re-ran the choice and the encode could change under the player -- another
-            // resolution, another session, another EXT-X-MAP on fMP4 -- while the renumbering kept
-            // claiming the segments were contiguous. Dropped with activeBackup at the end of a break.
-            // Released when the player moves on its own: it is resetting its decoder anyway, so
-            // following costs nothing extra. Without this, a reload during a pre-roll pins the rung
-            // the player woke up on -- 284x160 -- and holds the whole break there while the player
-            // has long since climbed.
+            // Stay on the rendition this break picked: pinning only the player type let the encode
+            // change under the player -- another resolution, another EXT-X-MAP -- while the
+            // renumbering still claimed the segments were contiguous.
+            // Released when the player moves on its own, or a reload during a preroll would hold the
+            // whole break on the rung it woke up at.
             if (stream.activeVariantUrl && want && stream.servedResolution &&
                 want.resolution !== stream.servedResolution) {
                 stream.activeVariantUrl = null;
@@ -1807,6 +2035,9 @@ function searchPlayerTypes(stream, realFetch) {
                     return attempt();
                 }
                 stream.activeBackup = playerType;
+                // On adoption only, not every poll: the first segment is the only one that pays
+                // the trip to the origin.
+                warmBackupSegments(text, realFetch);
                 return { playerType: playerType, text: text };
             })
             .catch(function (err) {
@@ -1817,7 +2048,30 @@ function searchPlayerTypes(stream, realFetch) {
     return attempt();
 }
 
-// One clean playlist, or null with a reason recorded.
+// Warms the CDN edge before the player asks: a Range slice is enough, what matters is that the
+// edge goes to the origin. Blocks nothing and never fails visibly.
+var warmed = {};
+function warmBackupSegments(text, realFetch) {
+    if (!CONFIG.warmBackupSegments || !text) { return; }
+    try {
+        var lines = text.replace(/\\r/g, '').split('\\n');
+        var last = null;
+        for (var i = 0; i < lines.length; i++) {
+            var l = lines[i];
+            if (l && l.charAt(0) !== '#' && l.indexOf('http') === 0) { last = l; }
+        }
+        if (!last || warmed[last]) { return; }
+        warmed[last] = 1;
+        // The ring must not grow for the whole session.
+        var keys = Object.keys(warmed);
+        if (keys.length > 200) { for (var k = 0; k < 100; k++) { delete warmed[keys[k]]; } }
+        realFetch(last, { headers: { Range: 'bytes=0-65535' } })
+            .then(function (r) { return r && r.arrayBuffer ? r.arrayBuffer() : null; })
+            .then(function () { wlogOnce('warm', 'debug', 'backup segments warmed on the CDN edge'); })
+            .catch(function () {});
+    } catch (e) { /* a warm-up must never bring the swap down */ }
+}
+
 function findCleanPlaylist(stream, realFetch) {
     // Stay on whatever is already serving this break: re-running the search every poll changed
     // player type mid-break, which is a second stream swap with nothing to resynchronise it.
@@ -1842,10 +2096,10 @@ function findCleanPlaylist(stream, realFetch) {
 }
 
 // -- probeRealPreroll ---------------------------------------------------------------------------
-// Debugging only. Fetches the channel under a token carrying none of our identity (random device
-// id, no Authorization, no Client-Integrity): a session Twitch has never seen is reliably served a
-// real stitched preroll, so marker detection and stripAds can be exercised on demand. The playlist
-// belongs to that session, so its MEDIA-SEQUENCE is not ours and the sequence ratchet is not tested.
+// Console-only, one-shot. Mints a token for a session Twitch has never seen -- a fresh anonymous
+// session reliably gets a real stitched preroll -- and fetches that session's view of the channel.
+// LIMITATION: the playlist belongs to that OTHER session, so its MEDIA-SEQUENCE is not ours. It
+// proves marker detection and stripAds against a real ad, not anything about our own numbering.
 function randomDeviceId() {
     var chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     var id = '';
@@ -1879,7 +2133,9 @@ function anonymousAccessToken(channel) {
 
 function workerSleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
 
-// The preroll is not always there on the first fetch, so one session is polled.
+// A preroll does not always exist the instant a session's first playlist is fetched -- Twitch's
+// own client only sees one because it keeps polling while it plays. One session, polled, not a
+// fresh token per poll: PROBE_TIMEOUT_MS bounds the whole one-shot call.
 var PROBE_POLL_MS = 1000;
 var PROBE_TIMEOUT_MS = 40000;
 
@@ -1897,7 +2153,7 @@ function pollForAdMarkers(mediaUrl, deadline) {
 function probeRealPreroll(channel) {
     var stream = streamsByChannel[channel];
     if (!stream || !stream.usherBase) {
-        return Promise.reject(new Error('channel "' + channel + '" is not tracked yet -- let the stream load first'));
+        return Promise.reject(new Error('that channel is not tracked yet -- let the stream load first'));
     }
     var variantResolution = null;
     return anonymousAccessToken(channel)
@@ -1913,9 +2169,10 @@ function probeRealPreroll(channel) {
             return pollForAdMarkers(candidates[0].url, Date.now() + PROBE_TIMEOUT_MS);
         })
         .then(function (text) {
-            // A clean view must never pass as a probe result.
+            // LOUD FAILURE: exercising the ad path on content that was never an ad measures the
+            // wrong thing. A clean anonymous view must never be mistaken for a probe result.
             if (!text) {
-                throw new Error('fresh anonymous session on ' + channel + ' stayed CLEAN for ' +
+                throw new Error('a fresh anonymous session stayed CLEAN for ' +
                     (PROBE_TIMEOUT_MS / 1000) + 's -- no ad markers, nothing to probe. Twitch does not' +
                     ' stitch every anonymous view; try again.');
             }
@@ -1946,7 +2203,7 @@ function onMasterPlaylist(url, text) {
     if (!stream) {
         stream = streamsByChannel[channel] = {
             channel: channel, usherBase: null, variants: Object.create(null), currentVariant: null,
-            adActive: false, stripping: false, cleanSince: null,
+            adActive: false, stripping: false,
             // Per player type, kept across breaks: valid for the session, so the next break starts
             // warm instead of paying for the token round-trip again.
             backupMasters: Object.create(null),
@@ -1972,12 +2229,9 @@ function onMasterPlaylist(url, text) {
 }
 
 // -- sequence renumbering ----------------------------------------------------------------------
-// MEDIA-SEQUENCE is per session and counts ads too, so an ad-free backup drifts behind by a break's
-// worth every time. The player fetches by number, so the drift costs gap x segment duration of
-// video. We renumber what we serve, moving the offset only at the edges of a break.
+// MEDIA-SEQUENCE is per session and counts ads, so an ad-free backup drifts behind by a break's
+// worth every time. We renumber what we serve, moving the offset only at the edges of a break.
 var SEQ_TAG = '#EXT-X-MEDIA-SEQUENCE:';
-// Segments the head may drift from the elapsed time before an exit re-anchor is refused.
-var SEQ_STEP_TOLERANCE = 6;
 
 function seqRead(text) {
     var at = text.indexOf(SEQ_TAG);
@@ -1996,58 +2250,75 @@ function seqWrite(text, value) {
     return text.substring(0, at) + SEQ_TAG + value + text.substring(end);
 }
 
-function seqSegments(text) {
-    // CRLF: a trailing \\r makes Date.parse NaN and kills every anchor silently.
-    var out = [], pdt = null, lines = text.replace(/\\r/g, '').split('\\n');
-    for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
-        if (line.indexOf('#EXT-X-PROGRAM-DATE-TIME:') === 0) { pdt = Date.parse(line.slice(25)); }
-        else if (line.indexOf('#EXTINF:') === 0) {
-            out.push({ pdt: pdt, d: parseFloat(line.slice(8)) || 0 });
-            pdt = null;
-        }
+// Renumbering MEDIA-SEQUENCE alone makes it diverge from LIVE-SEQUENCE by the injected offset, and
+// the playlist declares a live edge before its own window -- the player then believes it is behind,
+// speeds up, and drains itself. The GAP is shifted, not the value: the two tags have a distance of
+// their own inside the original.
+var LIVE_SEQ_TAG = '#EXT-X-TWITCH-LIVE-SEQUENCE:';
+
+function tagShift(text, tag, delta) {
+    var at = text.indexOf(tag);
+    if (at < 0) { return text; }
+    var end = text.indexOf('\\n', at);
+    if (end < 0) { end = text.length; }
+    if (end > 0 && text.charAt(end - 1) === '\\r') { end--; }
+    var value = parseInt(text.substring(at + tag.length, end), 10);
+    if (isNaN(value)) { return text; }
+    var shifted = value + delta;
+    // Like MEDIA-SEQUENCE: it is unsigned, it does not go below zero.
+    if (shifted < 0) { shifted = 0; }
+    return text.substring(0, at) + tag + shifted + text.substring(end);
+}
+
+// The two sources declare different gaps from the live edge, and at the handover the player turns
+// the jump into latency: +1 segment is reabsorbed in 47-70s, +2 is not reabsorbed at all -- the
+// player sits at 1.03x and stalls every ~80s. So the served gap is held continuous across the seam
+// and walked back one segment at a time, each step under the threshold.
+var LIVE_GAP_STEP_MS = 90000;
+
+function liveGapServe(stream, url, text, servedHead) {
+    if (!CONFIG.holdLiveGap) { return text; }
+    var at = text.indexOf(LIVE_SEQ_TAG);
+    if (at < 0) { return text; }
+    var end = text.indexOf('\\n', at);
+    if (end < 0) { end = text.length; }
+    if (end > 0 && text.charAt(end - 1) === '\\r') { end--; }
+    var servedLive = parseInt(text.substring(at + LIVE_SEQ_TAG.length, end), 10);
+    if (isNaN(servedLive)) { return text; }
+    var actual = servedHead - servedLive;
+    var target = stream.liveGap[url];
+    // First playlist of this rendition: adopt the gap as it is, touching nothing.
+    if (target === undefined || target === null) {
+        stream.liveGap[url] = actual;
+        stream.liveGapAt[url] = Date.now();
+        return text;
     }
-    return out;
+    if (target !== actual) {
+        var movedAt = stream.liveGapAt[url] || 0;
+        if (Date.now() - movedAt >= LIVE_GAP_STEP_MS) {
+            target += (actual > target) ? 1 : -1;
+            stream.liveGap[url] = target;
+            stream.liveGapAt[url] = Date.now();
+            wlog('debug', '[GAP] ' + url.slice(-18) + ': served gap -> ' + target +
+                ' (true ' + actual + ')');
+        }
+    } else {
+        stream.liveGapAt[url] = Date.now();
+    }
+    if (target === actual) { return text; }
+    var shifted = servedHead - target;
+    if (shifted < 0) { return text; }
+    return text.substring(0, at) + LIVE_SEQ_TAG + shifted + text.substring(end);
 }
 
 // The tail: the only anchor meaning the same instant in both sessions, since the original's head
 // freezes during a break while its tail follows the live edge.
 function seqTail(text) {
-    var seq = seqRead(text), segs = seqSegments(text);
-    if (seq === null || !segs.length || !segs[segs.length - 1].pdt) { return null; }
-    return { n: seq + segs.length - 1, pdt: segs[segs.length - 1].pdt, seq: seq, count: segs.length };
-}
-
-// The number this playlist gives to an instant. Interpolated: the two sessions' boundaries sit a
-// few hundred ms apart, so an exact PDT lookup finds nothing.
-function seqNumberAt(text, pdt) {
-    var seq = seqRead(text), segs = seqSegments(text);
-    if (seq === null || segs.length < 2 || !segs[0].pdt || !segs[segs.length - 1].pdt || !pdt) { return null; }
-    var first = segs[0].pdt, last = segs[segs.length - 1].pdt;
-    if (!(last > first)) { return null; }
-
-    // Real boundaries, not a uniform step: a break's window mixes durations and an average is off
-    // by a segment or two.
-    if (pdt >= first && pdt <= last) {
-        var at = first;
-        for (var i = 0; i < segs.length - 1; i++) {
-            var d = (segs[i + 1].pdt !== null && segs[i + 1].pdt !== undefined)
-                ? segs[i + 1].pdt - at
-                : (segs[i].d || 0) * 1000;
-            if (!(d > 0)) { continue; }
-            if (pdt <= at + d) { return seq + i + (pdt - at) / d; }
-            at += d;
-        }
-        return seq + segs.length - 1;
-    }
-
-    // Outside the window only the average is left, and one window of slack is as far as it reaches:
-    // beyond that a stale anchor gets a confident, meaningless answer.
-    var step = (last - first) / (segs.length - 1);
-    if (!(step > 0)) { return null; }
-    var slack = last - first;
-    if (pdt < first - slack || pdt > last + slack) { return null; }
-    return seq + (pdt - first) / step;
+    var seq = seqRead(text);
+    if (seq === null) { return null; }
+    var n = (text.match(/^#EXTINF:/gm) || []).length;
+    if (!n) { return null; }
+    return { n: seq + n - 1, seq: seq, count: n };
 }
 
 // The floor is per rendition: they share one stream object, but their playlists do not tick
@@ -2066,9 +2337,16 @@ function seqServe(stream, url, text, seq, field) {
     }
     stream.seqHeads[url] = head;
     stream.seqServedHead = head;
-    if (head === seq) { return text; }
-    var rewritten = seqWrite(text, head);
-    return rewritten === null ? text : rewritten;
+    // The earlier early return also skipped the gap handling, which is needed precisely when we do
+    // not renumber: the backup->original seam changes the gap even with the offset unchanged.
+    var out = text;
+    if (head !== seq) {
+        var rewritten = seqWrite(text, head);
+        // The same shift on LIVE-SEQUENCE, or the two tags diverge and the player believes it is
+        // head-seq segments behind, segments that do not exist.
+        if (rewritten !== null) { out = tagShift(rewritten, LIVE_SEQ_TAG, head - seq); }
+    }
+    return liveGapServe(stream, url, out, head);
 }
 
 // Anything from the original -- outside a break, or a stripped one -- takes the session offset.
@@ -2083,22 +2361,22 @@ function seqApplySessionOffset(stream, url, text) {
 // on. Do not add a detector that serves raw -- a variant switch looks identical, and the append is
 // then refused.
 
-// Re-anchors an offset so a new source continues the numbering already served: each session numbers
-// from its own base. False when there is no usable anchor, and the caller keeps what it had.
-function seqReanchor(stream, text, field) {
-    if (stream.seqServedPdt === undefined || stream.seqServedNumber === undefined) { return false; }
-    var here = seqNumberAt(text, stream.seqServedPdt);
-    if (here === null) { return false; }
-    stream[field] = Math.round(stream.seqServedNumber - here);
-    return true;
+
+// Backup to original needs no search: the two carry the same clean numbering, so the same media
+// must get the same served number and the offset is the one already in use. Applies equally to the
+// break exit and to falling back to stripping mid-break.
+function seqAdoptBackupOffset(stream, why) {
+    stream.seqOffset = stream.seqBackupOffset;
+    stream.seqSource = 'orig';
+    stream.seqBlind = false;
+    wlog('info', '[SEQ] ' + why + ': offset ' + stream.seqOffset + ' adopted from the backup offset');
 }
 
-// A stripped break: no backup found, so we are back on the original numbering.
 function seqStrippedBreak(stream, url, text) {
     if (!CONFIG.renumberSequence) { return text; }
-    // Marked only on success, or a failed anchor is never retried and rides the whole break.
-    if (stream.seqInBreak && stream.seqSource !== 'orig' && seqReanchor(stream, text, 'seqOffset')) {
-        stream.seqSource = 'orig';
+    // The backup vanished mid-break: same transition as the exit, and it is derived the same way.
+    if (stream.seqInBreak && stream.seqSource !== 'orig') {
+        seqAdoptBackupOffset(stream, 'backup lost mid-break');
     }
     // Still a break, or the exit never re-anchors.
     if (!stream.seqInBreak) {
@@ -2106,11 +2384,6 @@ function seqStrippedBreak(stream, url, text) {
         stream.seqSource = 'orig';
     }
     var served = seqApplySessionOffset(stream, url, text);
-    var tail = seqTail(text);
-    if (tail) {
-        stream.seqServedPdt = tail.pdt;
-        stream.seqServedNumber = stream.seqServedHead + (tail.count - 1);
-    }
     return served;
 }
 
@@ -2120,47 +2393,37 @@ function seqOutsideBreak(stream, url, text) {
     if (!CONFIG.renumberSequence) { return text; }
     // On adActive, not the markers: a pod drops them between videos and the break stays open.
     if (stream.seqInBreak && !stream.adActive) {
+        // The source is read BEFORE it is cleared. Written the other way round, the branch below
+        // never ran once (claim 073) -- dead code that looked live, and the clean exits that seemed
+        // to confirm it were being produced by the pattern instead.
+        var fromBackup = stream.seqSource && stream.seqSource.indexOf('backup:') === 0;
         stream.seqInBreak = false;
         stream.seqSource = 'orig';
-        var previous = stream.seqOffset;
-        if (seqReanchor(stream, text, 'seqOffset')) {
-            // Continuity, not magnitude: a size cap would have to exempt the pre-roll exit, which
-            // moves by thousands and is still continuous.
-            var head = seqRead(text), tail = seqTail(text);
-            if (head !== null && tail && stream.seqServedHead !== null && stream.seqServedHead !== undefined &&
-                stream.seqServedPdt) {
-                // Tolerance from the elapsed time: a constant conflates the offset moving with the
-                // playlist advancing, and rejects good corrections.
-                var step = (tail.d || 2) * 1000;
-                var expected = (tail.pdt - stream.seqServedPdt) / step;
-                var actual = (head + stream.seqOffset) - stream.seqServedHead;
-                if (Math.abs(actual - expected) > SEQ_STEP_TOLERANCE) {
-                    wlog('info', '[SEQ] exit re-anchor rejected: offset ' + stream.seqOffset + ' moves the head by ' +
-                        actual.toFixed(1) + ' segments while ' + expected.toFixed(1) + ' went by -- keeping ' + previous);
-                    stream.seqOffset = previous;
-                }
-            }
-        }
-        stream.seqBlind = false;
+        if (fromBackup) { seqAdoptBackupOffset(stream, 'break exit'); }
     }
     return seqApplySessionOffset(stream, url, text);
 }
 
-// Inside a break, serving the backup in place of the original.
 function seqInsideBreak(stream, url, text, cleanText) {
     if (!CONFIG.renumberSequence) { return cleanText; }
     // No tail: use the backup's own offset. The session offset on a backup number gets written back
     // into seqOffset by the floor and corrupts it for good.
     var backup = seqTail(cleanText);
     if (!backup) {
-        if (stream.seqInBreak) { return seqServe(stream, url, cleanText, seqRead(cleanText), 'seqBackupOffset'); }
+        if (stream.seqInBreak) {
+            return seqServe(stream, url, cleanText, seqRead(cleanText), 'seqBackupOffset');
+        }
         return cleanText;
     }
 
     // The backup changes identity when its player type picks up ads, and another session numbers
     // from another base.
     var source = 'backup:' + (stream.activeBackup || '?');
-    if (stream.seqInBreak && stream.seqSource !== source && seqReanchor(stream, cleanText, 'seqBackupOffset')) {
+    if (stream.seqInBreak && stream.seqSource !== source) {
+        // Backup to backup: they all carry the live numbering, so the offset must not move. Only
+        // measured for mobile_feed and popout, so the transition is logged rather than silent.
+        wlog('info', '[SEQ] backup changed ' + stream.seqSource + ' -> ' + source +
+            ', keeping offset ' + stream.seqBackupOffset);
         stream.seqSource = source;
     }
 
@@ -2181,12 +2444,73 @@ function seqInsideBreak(stream, url, text, cleanText) {
         }
     }
 
-    var served = seqServe(stream, url, cleanText, backup.seq, 'seqBackupOffset');
-    // Anchor from the number written, not the formula: the floor makes them differ, and the exit
-    // would agree with itself while the player starves.
-    stream.seqServedPdt = backup.pdt;
-    stream.seqServedNumber = stream.seqServedHead + (backup.count - 1);
-    return served;
+    return seqServe(stream, url, cleanText, backup.seq, 'seqBackupOffset');
+}
+
+// -- continuity trace ---------------------------------------------------------------------------
+// What we served, keyed by the url the player will fetch. Bounded: the map lives as long as the
+// tab, and the player never reaches back further than one window.
+var TRACE_MAX = 400;
+var tracedSegments = {};
+var tracedOrder = [];
+var traceLastRequest = {};
+var traceSegDur = {};
+
+function traceServed(playlistUrl, servedText) {
+    if (!CONFIG.traceContinuity) { return; }
+    var seq = seqRead(servedText);
+    if (seq === null) { return; }
+    var lines = servedText.replace(/\\r/g, '').split('\\n'), n = seq;
+    // Duration is read from the EXTINFs, NOT from TARGETDURATION: that is the rounded-up ceiling
+    // and Twitch declares it 5 or 6 on 2.000s segments. Using it inflates every distance by 2.5x
+    // and turns any long absence into an invented splice.
+    var durSum = 0, durN = 0;
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        if (line.charAt(0) === '#') {
+            var xi = /^#EXTINF:([0-9.]+)/.exec(line);
+            if (xi) { var xv = parseFloat(xi[1]); if (xv > 0) { durSum += xv; durN++; } }
+        }
+        if (!line || line.charAt(0) === '#') { continue; }
+        if (tracedSegments[line] === undefined) {
+            tracedSegments[line] = { n: n, playlist: playlistUrl };
+            tracedOrder.push(line);
+        }
+        n++;
+    }
+    if (durN > 0) { traceSegDur[playlistUrl] = durSum / durN; }
+    while (tracedOrder.length > TRACE_MAX) { delete tracedSegments[tracedOrder.shift()]; }
+}
+
+// Called on every segment the player actually fetches. The only place in this script that observes
+// the player instead of predicting it.
+function traceRequested(url) {
+    var hit = tracedSegments[url];
+    if (!hit) { return; }
+    var now = Date.now();
+    var last = traceLastRequest[hit.playlist];
+    traceLastRequest[hit.playlist] = { n: hit.n, at: now };
+    if (last === undefined) { return; }
+    if (hit.n === last.n + 1) { return; }
+    // The cursor is per rendition and lives as long as the channel, so a rung the player left and
+    // came back to shows a large distance that is not a splice. A real splice is media gained
+    // without spending wall clock; an absence costs as much clock as media.
+    var gap = hit.n - last.n - 1;
+    if (gap > 0) {
+        var dur = traceSegDur[hit.playlist] || 0;
+        if (dur > 0) {
+            // The tolerance has to grow with the absence: media and clock drift by about 0.3%,
+            // which over twenty minutes is a few seconds -- a fixed one-segment margin mistakes it
+            // for a splice. One segment PLUS half a percent of the wait.
+            var media = gap * dur, wall = (now - last.at) / 1000;
+            if (media - wall <= dur + wall * 0.005) { return; }
+        }
+    }
+    var stream = streamsByPlaylistUrl[hit.playlist];
+    var where = stream && stream.adActive ? 'during a break' : (stream && stream.seqInBreak ? 'at the exit' : 'in the clear');
+    self.postMessage({ key: 'ContinuityBreak', channel: stream ? stream.channel : null,
+        from: last.n, to: hit.n, delta: gap, where: where,
+        wall: Math.round((now - last.at) / 100) / 10 });
 }
 
 function onMediaPlaylist(url, text, realFetch) {
@@ -2198,36 +2522,25 @@ function onMediaPlaylist(url, text, realFetch) {
         stream.seqHeads = {};
         stream.seqServedHead = null;
         stream.seqInBreak = false;
+        // Per rendition, like seqHeads and for the same reason: two renditions do not tick
+        // together, and they can declare different gaps.
+        stream.liveGap = {};
+        stream.liveGapAt = {};
     }
 
     if (!hasAdMarkers(text)) {
         if (stream.adActive) {
-            // Multi-ad pods drop the markers for a poll or two between videos, and calling that
-            // the end meant resyncing mid-break. The clean playlist is still served during the
-            // grace window, so only the end-of-break decision waits, not the content.
-            if (!stream.cleanSince) {
-                stream.cleanSince = Date.now();
-            }
-            if (Date.now() - stream.cleanSince >= CONFIG.adEndGraceMs) {
-                stream.adActive = false;
-                stream.stripping = false;
-                stream.cleanSince = null;
-                // Released so the next break picks a player type on its own merits. The cached
-                // master playlists deliberately survive: they are what make the next break start
-                // without paying for the token round-trip all over again.
-                stream.activeBackup = null;
-                stream.activeVariantUrl = null;
-                self.postMessage({ key: 'AdEnded', channel: stream.channel });
-            }
+            stream.adActive = false;
+            stream.stripping = false;
+            // Released so the next break picks a player type on its own merits. The cached
+            // master playlists deliberately survive: they are what make the next break start
+            // without paying for the token round-trip all over again.
+            stream.activeBackup = null;
+            stream.activeVariantUrl = null;
+            self.postMessage({ key: 'AdEnded', channel: stream.channel });
         }
         return Promise.resolve(seqOutsideBreak(stream, url, text));
     }
-    // Markers are back: whatever gap we were in was between ads, not the end of the break
-    if (stream.cleanSince) {
-        wlog('debug', 'ad markers returned after ' + (Date.now() - stream.cleanSince) + 'ms of clean playlist - same break, still one pod');
-        stream.cleanSince = null;
-    }
-
     var isMidroll = text.indexOf('"MIDROLL"') >= 0 || text.indexOf('"midroll"') >= 0;
     if (!stream.adActive) {
         stream.adActive = true;
@@ -2245,7 +2558,9 @@ function onMediaPlaylist(url, text, realFetch) {
     return findCleanPlaylist(stream, realFetch).then(function (clean) {
         if (clean) {
             self.postMessage({ key: 'AdBlocked', channel: stream.channel, playerType: clean.playerType, isMidroll: isMidroll, stripping: false, resolution: stream.servedResolution || null });
-            return seqInsideBreak(stream, url, text, clean.text);
+            // The rendition belongs in the key: a backup that changes rung mid-break is another
+            // encode, another seam, and it is invisible if only the player type is compared.
+            return carryAdMarkers(text, seqInsideBreak(stream, url, text, clean.text));
         }
         if (CONFIG.stripAdSegments) {
             var strippedText = stripAds(text, stream);
@@ -2259,7 +2574,8 @@ function onMediaPlaylist(url, text, realFetch) {
 
 function installFetchHook() {
     var realFetch = self.fetch;
-    // probeRealPreroll runs off this call path and still needs the unhooked fetch.
+    // Kept outside this closure too: probeRealPreroll runs from the message listener, off the
+    // fetch-hook call path entirely, and still needs the unhooked fetch.
     workerRealFetch = realFetch;
     self.fetch = function (input, options) {
         if (typeof input !== 'string') {
@@ -2269,6 +2585,10 @@ function installFetchHook() {
 
         if (adSegments.has(url)) {
             return Promise.resolve(emptySegmentResponse());
+        }
+
+        if (CONFIG.traceContinuity && tracedSegments[url] !== undefined) {
+            traceRequested(url);
         }
 
         if (url.indexOf('/channel/hls/') >= 0 && url.indexOf('picture-by-picture') < 0) {
@@ -2294,7 +2614,7 @@ function installFetchHook() {
                 if (response.status !== 200) { return response; }
                 return response.text()
                     .then(function (text) { return onMediaPlaylist(url, text, realFetch); })
-                    .then(function (out) { return new Response(out, { status: 200 }); });
+                    .then(function (out) { traceServed(url, out); return new Response(out, { status: 200 }); });
             });
         }
 
@@ -2338,7 +2658,6 @@ self.addEventListener('message', function (e) {
         if (left) {
             left.adActive = false;
             left.stripping = false;
-            left.cleanSince = null;
             left.activeBackup = null;
             left.activeVariantUrl = null;
             // Same for the sequence state: coming back the player is a new session, and an offset
@@ -2349,15 +2668,23 @@ self.addEventListener('message', function (e) {
             left.seqInBreak = false;
             left.seqSource = null;
             left.seqBackupOffset = 0;
-            left.seqServedPdt = undefined;
-            left.seqServedNumber = undefined;
             left.seqBlind = false;
+            left.liveGap = {};
+            left.liveGapAt = {};
+            // Our own numbering goes too: coming back the player is a new session with numbers of
+            // its own, and a stale floor would block it instead of protecting it.
+            left.servedSource = null;
+            // traceLastRequest lives outside the stream, keyed by playlist url: release what
+            // belonged to its renditions, or it stays attached to urls nobody will ask for again.
+            var urls = left.variants ? Object.keys(left.variants) : [];
+            for (var u = 0; u < urls.length; u++) { delete traceLastRequest[urls[u]]; delete traceSegDur[urls[u]]; }
         }
         return;
     }
     if (data.key === 'UpdateAuthorization') { GQLState.authorization = data.value; return; }
     if (data.key === 'PlayerReloaded') { lastReloadAt = Date.now(); return; }
     if (data.key === 'ProbeRealPreroll') {
+        // One-shot: no config flag, nothing left "on" after this resolves.
         probeRealPreroll(data.channel).then(function (result) {
             self.postMessage({ key: 'ProbeRealPrerollResult', id: data.id, ok: true, result: result });
         }, function (err) {
@@ -2423,8 +2750,11 @@ installFetchHook();
                         backupPlayerTypes: Config.BackupPlayerTypes.slice(),
                         stripAdSegments: Config.StripAdSegments,
                         renumberSequence: Config.RenumberSequence !== false,
+                        carryAdMarkers: Config.CarryAdMarkers !== false,
+                        holdLiveGap: Config.HoldLiveGap !== false,
+                        warmBackupSegments: Config.WarmBackupSegments !== false,
+                        traceContinuity: Config.TraceContinuity !== false,
                         forcePlayerType: !!Config.ForceAccessTokenPlayerType,
-                        adEndGraceMs: Math.max(0, Config.AdEndGraceSeconds * 1000),
                         tokenMode: State.gqlTokenMode
                     },
                     gql: {
@@ -2446,8 +2776,7 @@ installFetchHook();
                 this.addEventListener('message', async (event) => {
                     const data = event.data || {};
                     if (messageIsStale(data)) {
-                        log('debug', 'ignoring a late ' + data.key + ' for ' + data.channel +
-                            ', that channel has been left');
+                        log('debug', 'ignoring a late ' + data.key + ' for a channel that has been left');
                         return;
                     }
                     switch (data.key) {
@@ -2463,11 +2792,18 @@ installFetchHook();
                         case 'AdStarted':
                             State.counters.breaks++;
                             State.adActive = true;
+                            // Buffer held BEFORE the break, to tell whether long-session latency
+                            // growth comes from the breaks or from between them.
+                            State.latencyAtBreak = readLiveLatency();
+                            State.depthAtBreak = (function () {
+                                const b = readBufferedRanges();
+                                return (b && b.tail !== null) ? b.tail - b.at : null;
+                            })();
                             State.adIsMidroll = !!data.isMidroll;
                             // Codec belongs on this line: which path a break takes is decided by
                             // whether the backup ladder can match it, so a line without it cannot
                             // be read afterwards.
-                            log('info', 'ad break started on ' + data.channel +
+                            log('info', 'ad break started' +
                                 (data.isMidroll ? ' (midroll)' : '') + ' -- ' + describePlayback());
                             if (Config.CrossCheckAdEvents && State.playerAdEvent !== 'start') {
                                 log('debug', 'we saw the ad before the player reported stitchedadstart');
@@ -2489,6 +2825,18 @@ installFetchHook();
                             }
                             updateBanner();
                             break;
+                        case 'ContinuityBreak':
+                            // The worker saw the player ask for a number that is not the next one
+                            // we served. Nothing about this line is channel-specific: it is our own
+                            // numbering, read back from the player's own request.
+                            log('warn', '[TRACE] continuity break ' + data.where +
+                                ': player went ' + data.from + ' -> ' + data.to +
+                                ' (' + (data.delta > 0
+                                    ? data.delta + ' segment(s) of video SKIPPED'
+                                    : (-data.delta) + ' segment(s) REPEATED') +
+                                ', ' + data.wall + 's of wall clock)');
+                            State.counters.continuityBreaks++;
+                            break;
                         case 'AdEnded':
                             State.adActive = false;
                             State.activeBackupPlayerType = null;
@@ -2498,13 +2846,20 @@ installFetchHook();
                             // Before the restore, not after: setQuality is not immediate, so
                             // logging afterwards prints the rung being left beside the line
                             // announcing the return.
-                            log('info', 'ad break finished on ' + data.channel +
-                                ' -- watched at ' + describePlayback());
+                            log('info', 'ad break finished -- watched at ' + describePlayback());
                             restoreQualityAfterAdBreak();
                             updateBanner();
-                            if (Config.ReloadPlayerAfterAd) {
-                                reloadPlayer();
+                            if (Config.TraceContinuity) {
+                                // Third read, at the INSTANT of the handover. With only two reads
+                                // -- break start and 8s after the end -- a latency step cannot be
+                                // attributed: is it inside the break or in the source swap?
+                                State.latencyAtHandover = readLiveLatency();
+                                Stalls.exits++;
+                                Stalls.lastExitAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+                                reportExitBuffer();
                             }
+                            // The exit touches nothing: the numbering is re-anchored before this
+                            // fires, and a stuck player is caught by the recovery watchers.
                             break;
                         case 'ProbeRealPrerollResult': {
                             const pending = State.pendingProbes.get(data.id);
@@ -2573,7 +2928,7 @@ installFetchHook();
             return OverlayAds.buffer.slice();
         },
         overlayLayout: describeOverlayLayout,
-        // Debugging only. Asks the worker to fetch this channel as a session Twitch has never seen.
+        // One-shot, console-only. See the worker's probeRealPreroll. Nothing is left on.
         probeRealPreroll() {
             const channel = Navigation.channel;
             if (!channel) {
@@ -2588,7 +2943,7 @@ installFetchHook();
                 return Promise.reject(err);
             }
             const id = Math.random().toString(36).slice(2);
-            log('info', 'probeRealPreroll: fetching ' + channel + ' as a fresh anonymous session...');
+            log('info', 'probeRealPreroll: fetching the channel as a fresh anonymous session...');
             return new Promise((resolve, reject) => {
                 State.pendingProbes.set(id, { resolve, reject });
                 worker.postMessage({ key: 'ProbeRealPreroll', id, channel });
@@ -2598,7 +2953,7 @@ installFetchHook();
                     result.variantResolution);
                 return result;
             }, (err) => {
-                // Never let a failure read as success at the console.
+                // Loud on purpose: this must never look like success at the console.
                 console.error('[VAFT2] probeRealPreroll FAILED: ' + err.message);
                 throw err;
             });
@@ -2642,7 +2997,8 @@ installFetchHook();
 
     function onReady() {
         ensurePlayerWired();
-        startStallBackstop();
+        startStallCensus();
+        startLatencyTrim();
         startDeadPlayerWatch();
         startOverlayAdWatch();
         // The player instance is replaced on every reload, and there is no event for that, so

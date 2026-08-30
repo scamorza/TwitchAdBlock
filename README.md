@@ -26,84 +26,90 @@ one is a race. The console tells you it happened:
 
 ## How it works
 
-**Stitched ads** arrive inside the same HLS playlist as the stream, so there is no request to block.
-The script hooks `window.Worker` and `window.fetch` and works on the playlist: when it sees ad
-markers, it requests a playback access token under a different player type and serves that stream
-instead. Player types are tried in order, and within each one every rung of the quality ladder, so a
-break where the top rendition is stitched can still be served from a lower one.
+Twitch serves ads two ways, and the script answers each one separately.
 
-Which request comes back clean is decided on the pair `playerType` + `platform` — the only two
-client-controlled fields that reach the signed token. `mobile_feed` asked as `android` is the one
-combination that is both ad-free and uncapped: 1080p on AVC, 1440p `hev1` on HEVC. Because it carries
-the source codec, a break served from it costs no rendition change at all, which is what the player
-stalls on. `popout` is the second chance at full quality — each request is its own ad auction, so
-asking again is worth one round-trip — and `autoplay` is last, ad-free too but capped at 640x360.
+**Stitched ads** arrive inside the HLS playlist itself, so there is no request to block. The script
+hooks `window.Worker` and `window.fetch` and works on the playlist: when ad markers appear, it asks
+for a playback access token under a different player type and serves that stream instead. Player
+types are tried in order, and within each one every rung of the quality ladder, so a break where the
+top rendition is stitched can still be served from a lower one.
 
-That holds on any channel: where the old chain led with `embed` and `popout` — each its own ad
-auction, so a break could still fall through both to `autoplay` — the exemption is now had on the
-first request rather than by retrying.
+Which request comes back clean is decided by `playerType` + `platform`, the only client-controlled
+fields that reach the signed token. `mobile_feed` asked as `android` is both ad-free and uncapped —
+1080p on AVC, 1440p on HEVC — so a break served from it costs no rendition change, which is what the
+player stalls on. `popout` is the second chance at full quality, since each request is its own ad
+auction, and `autoplay` is last: ad-free too, but capped at 640x360.
 
-Where no clean stream exists at all — now rare, since `mobile_feed` covers the HEVC channels that
-used to have nothing but an AVC ladder underneath them — two things happen. The player is stepped
-down to the best rung of a different codec, which turns one candidate into the whole ladder. Until
-that lands, ad segments are answered with an empty body: the playlist keeps its structure, so the
-player does not run out of media and get rendered as offline.
+Swapping the stream is the easy half. The hard half is handing the player back a timeline it still
+believes in, and much of the script is that. The backup is a different session: it numbers segments
+from its own base and does not count the ads, so what gets served is renumbered onto the numbering
+the player already has, live-edge tags included. The distance from the live edge is held steady
+across the seam and walked back gradually rather than arriving as one step, which the player would
+otherwise chase and drain its buffer for. The original's ad markers are carried onto the clean
+playlist so the player still raises its own buffer target during the break, and the backup's first
+segments are fetched early so the CDN edge already has them when the player asks.
+
+Where no clean stream exists at all — rare now that `mobile_feed` covers the HEVC channels — the
+player is stepped down to the best rung of another codec, which turns one candidate into a whole
+ladder. Until that lands, ad segments are answered with an empty body: the playlist keeps its
+structure, so the player does not run out of media and get rendered as offline.
 
 **Display ads** — the pod above chat, squeezeback, lower third, pause ads — are decided in the
 browser, so none of the above ever sees them. Twitch's own ad manager holds every ad request in a
 queue and drains it as `declineReason ? decline() : isReady && fn()`, where `fn()` is the fetch to
-the ad exchange. Setting `declineReason` stops the request that would have produced the creative.
-That is upstream of the container, not a hidden overlay, and it uses Twitch's own decline path
-including their flag for not reporting it.
-
-The **mini player above chat** is refused separately, by denying its access token locally rather than
-sending something the server will reject.
+the ad exchange. Setting `declineReason` stops the request that would have produced the creative —
+upstream of the container, not a hidden overlay — using Twitch's own decline path. The **mini player
+above chat** is refused separately, by denying its access token locally rather than sending
+something the server will reject.
 
 Blocking ads breaks playback in its own ways, so a fair part of the script exists to put it back
 together: resuming a stream Twitch paused and will not retry, restoring quality after a break,
-reloading a player whose media element was torn down by a decode error.
+reloading a player whose media element was torn down by a decode error, and pulling latency back
+down when the player settles further behind live than it needs to be.
 
 ## Configuration
 
-Every option, what it does and when touching it is justified: [`doc/config.md`](doc/config.md).
-
-The short version — the defaults are the tested configuration. The two worth knowing are
-`StripAdSegments`, which decides what happens when no clean stream exists, and
-`DeclineClientSideAds`, which is the only thing standing between you and display ads.
+The defaults are the tested configuration. The two worth knowing are `StripAdSegments`, which
+decides what happens when no clean stream exists, and `DeclineClientSideAds`, which is the only
+thing standing between you and display ads.
 
 ## Reading the console
 
 Everything is prefixed `[VAFT2]`. Filtering on that in DevTools shows what the script is doing.
 Default level is `info`, which is a few lines per break; `window.vaft2.setLogLevel('debug')` opens it
-up. The console entry points are listed on load and documented in
-[`doc/help_info.md`](doc/help_info.md).
+up. The console entry points are listed on load.
+
+Channel names are never printed. Which channel a line belongs to is whichever tab it came from.
 
 | Line | Meaning |
 | --- | --- |
 | `v2 active -- <version>` | Loaded, followed by the list of callable entry points. |
 | `client-side ad manager declined at …` | Display ads will not be requested. Its absence means they will. |
-| `ad break started on <channel> -- <quality> <codec>` | A break was detected. The codec is there because it decides which path the break takes. |
+| `ad break started -- <quality> <codec>` | A break was detected. The codec is there because it decides which path the break takes. |
 | `serving a clean stream via <type> at <resolution>` | A backup stream was found. The resolution is what is actually being served, not what the player label says. |
 | `backup via <type> had ads at every rendition` | That player type was stitched at every rung; moving to the next. |
 | `stepping down from … to …` | No same-codec backup, so the player was moved to another codec to unlock one. |
-| `ad break finished on <channel>` | Over; quality is handed back on the next line. |
-| `left <channel> mid-break -- state cleared for <channel>` | Channel changed during a break, so the break state was dropped instead of carried over. A fresh break on the new channel a second later is Twitch's own: arriving is a new player session, and that is its own auction. |
+| `ad break finished -- watched at <quality>` | Over; quality is handed back on the next line. |
+| `left the channel mid-break -- state cleared` | Channel changed during a break, so the break state was dropped instead of carried over. A fresh break on the new channel a second later is Twitch's own: arriving is a new player session, and that is its own auction. |
 | `denied a picture-by-picture token locally` | The mini player above chat was refused. |
+| `cushion stuck at <n>s … moving the playhead forward <n>s` | The player had settled further behind live than it needs to be, so the playhead was moved into buffer already downloaded. No reload, no rebuffer. |
 | `OVERLAY AD suspected …` | A display ad got through the decline. Worth an issue. |
 | `no clean playlist and stripping is off -- ads will be shown` | Exactly what it says. |
 | `client-side ad manager not found …` | The lookup failed. Display ads are **not** blocked. |
 | `the player is gone -- no media, no buffer …` | A decode error tore the player down; it is being reloaded. |
 
+Three tagged families are diagnostics rather than status, and matter only when something looks
+wrong. `[SEQ]` and `[GAP]` report the renumbering and the live-edge handling at each seam.
+`[TRACE]` reports what the playback actually did: `break exit CLEAN` / `STALLED` / `DEGRADED` grades
+every break by whether the buffer stayed in one piece and the playhead kept moving, `stall #n`
+counts stalls and says whether they cluster after a break or happen in clear play, and
+`continuity break` fires when the player asks for a segment number that is not the one we served
+next — the one line that reads back what the player did instead of what the script intended.
+
 `window.vaft2.status()` prints the whole state, which is more useful than any single line.
 
 When opening an issue this output is what makes a report actionable. Please do not attach HAR files
 or `chrome://net-export` captures: they contain your session tokens.
-
-## Known issues
-
-None. The issues inherited from upstream have been closed. The information was turning ambiguous
-across versions, so I preferred to remove entirely what is no longer worth knowing. If you run into
-a problem, open a new issue.
 
 ## What to expect
 
