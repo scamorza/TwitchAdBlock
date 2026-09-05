@@ -41,18 +41,24 @@ player stalls on. `popout` is the second chance at full quality, since each requ
 auction, and `autoplay` is last: ad-free too, but capped at 640x360.
 
 Swapping the stream is the easy half. The hard half is handing the player back a timeline it still
-believes in, and much of the script is that. The backup is a different session: it numbers segments
-from its own base and does not count the ads, so what gets served is renumbered onto the numbering
-the player already has, live-edge tags included. The distance from the live edge is held steady
-across the seam and walked back gradually rather than arriving as one step, which the player would
-otherwise chase and drain its buffer for. The original's ad markers are carried onto the clean
-playlist so the player still raises its own buffer target during the break, and the backup's first
-segments are fetched early so the CDN edge already has them when the player asks.
+believes in, and most of the script is that. The two sessions cannot be matched on
+`MEDIA-SEQUENCE`: that number is per session and counts ad segments, so an ad-free backup drifts
+further from it at every break. They are matched on `EXT-X-TWITCH-LIVE-SEQUENCE` instead, which is
+positional and global to the broadcast, so it survives the session reset a stitched ad causes.
 
-Where no clean stream exists at all — rare now that `mobile_feed` covers the HEVC channels — the
-player is stepped down to the best rung of another codec, which turns one candidate into a whole
-ladder. Until that lands, ad segments are answered with an empty body: the playlist keeps its
-structure, so the player does not run out of media and get rendered as offline.
+Both sessions write into one table indexed on that number, and the playlist the player receives is
+built from it rather than passed through. Segments come from the page's own session; the backup
+only fills the numbers an ad took away. Timestamps are stamped on a single clock — ours — because
+the two sessions label the same content seconds apart, and copying either one makes the timeline
+jump at every handover. The low-latency look-ahead follows the same rule with one exception: Twitch
+publishes none of it for much of a break, so inside one the backup is the only source that has any.
+
+Ad segments are not removed from the playlist, they are answered with an empty body. Removing them
+leaves a playlist with no media at all when every segment is an ad, and the player then runs out of
+timeline and Twitch renders the channel as offline. The ad `DATERANGE`s are stripped, though: they
+light Twitch's own "ad in progress" overlay whether or not an ad ever plays. When the broadcast
+really does end, `EXT-X-ENDLIST` is carried through, so the player stops instead of sitting on a
+window that no longer moves.
 
 **Display ads** — the pod above chat, squeezeback, lower third, pause ads — are decided in the
 browser, so none of the above ever sees them. Twitch's own ad manager holds every ad request in a
@@ -69,47 +75,19 @@ down when the player settles further behind live than it needs to be.
 
 ## Configuration
 
-The defaults are the tested configuration. The two worth knowing are `StripAdSegments`, which
-decides what happens when no clean stream exists, and `DeclineClientSideAds`, which is the only
-thing standing between you and display ads.
+`Config` at the top of the script. The defaults are the tested configuration, and every entry left
+in it is one you can genuinely turn off — anything that only breaks when touched has been taken out
+and made a constant.
 
-## Reading the console
+The one worth knowing is **`DeclineClientSideAds`**, which is the only thing standing between you
+and display ads. **`BackupPlayerTypes`** decides the order the clean stream is looked for in.
+**`LogLevel`** is `info` by default; `window.vaft2.setLogLevel('debug')` opens it up for a session
+without editing anything. The rest are the recovery watchers and the diagnostics, on by default.
 
-Everything is prefixed `[VAFT2]`. Filtering on that in DevTools shows what the script is doing.
-Default level is `info`, which is a few lines per break; `window.vaft2.setLogLevel('debug')` opens it
-up. The console entry points are listed on load.
-
-Channel names are never printed. Which channel a line belongs to is whichever tab it came from.
-
-| Line | Meaning |
-| --- | --- |
-| `v2 active -- <version>` | Loaded, followed by the list of callable entry points. |
-| `client-side ad manager declined at …` | Display ads will not be requested. Its absence means they will. |
-| `ad break started -- <quality> <codec>` | A break was detected. The codec is there because it decides which path the break takes. |
-| `serving a clean stream via <type> at <resolution>` | A backup stream was found. The resolution is what is actually being served, not what the player label says. |
-| `backup via <type> had ads at every rendition` | That player type was stitched at every rung; moving to the next. |
-| `stepping down from … to …` | No same-codec backup, so the player was moved to another codec to unlock one. |
-| `ad break finished -- watched at <quality>` | Over; quality is handed back on the next line. |
-| `left the channel mid-break -- state cleared` | Channel changed during a break, so the break state was dropped instead of carried over. A fresh break on the new channel a second later is Twitch's own: arriving is a new player session, and that is its own auction. |
-| `denied a picture-by-picture token locally` | The mini player above chat was refused. |
-| `cushion stuck at <n>s … moving the playhead forward <n>s` | The player had settled further behind live than it needs to be, so the playhead was moved into buffer already downloaded. No reload, no rebuffer. |
-| `OVERLAY AD suspected …` | A display ad got through the decline. Worth an issue. |
-| `no clean playlist and stripping is off -- ads will be shown` | Exactly what it says. |
-| `client-side ad manager not found …` | The lookup failed. Display ads are **not** blocked. |
-| `the player is gone -- no media, no buffer …` | A decode error tore the player down; it is being reloaded. |
-
-Three tagged families are diagnostics rather than status, and matter only when something looks
-wrong. `[SEQ]` and `[GAP]` report the renumbering and the live-edge handling at each seam.
-`[TRACE]` reports what the playback actually did: `break exit CLEAN` / `STALLED` / `DEGRADED` grades
-every break by whether the buffer stayed in one piece and the playhead kept moving, `stall #n`
-counts stalls and says whether they cluster after a break or happen in clear play, and
-`continuity break` fires when the player asks for a segment number that is not the one we served
-next — the one line that reads back what the player did instead of what the script intended.
-
-`window.vaft2.status()` prints the whole state, which is more useful than any single line.
-
-When opening an issue this output is what makes a report actionable. Please do not attach HAR files
-or `chrome://net-export` captures: they contain your session tokens.
+`HideVisibility` and `ResumeOnFocus` are deliberately one switch under two names: reporting the page
+visible is what stops Twitch downscaling a background tab, and the resume exists only to pay for the
+side effect of that lie. Turning one off without the other leaves a stream that can pause with
+nobody coming.
 
 ## What to expect
 
@@ -117,8 +95,9 @@ Not defects. These follow from how the thing works.
 
 - **Quality can drop during a break**, but only if `mobile_feed` and `popout` both come back stitched
   and the break falls to `autoplay`, whose ladder Twitch caps at 640x360. Restored when it ends.
-- **The picture can freeze for the length of a break**, where the ladder carries no rung of a
-  different codec and ad segments are answered with an empty body. That keeps the stream alive,
+- **The picture can freeze for the length of a break**, when no player type comes back clean and
+  both sources go quiet. The break is then bridged on the original: empty bodies keep the playlist
+  moving so the player does not give up, but nothing new is decoded. It keeps the stream alive,
   not moving.
 - **Twitch buffers on its own** around any discontinuity, so a baseline of stalling survives whatever
   the script does.
