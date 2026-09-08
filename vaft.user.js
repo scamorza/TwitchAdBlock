@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      2.2.0
+// @version      2.2.1
 // @description  Twitch ad blocking
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -60,6 +60,12 @@
         TraceContinuity: true,
         // Prime suspect in the reload loop; first thing to try if it reappears.
         RefreshTokenOnReload: true,
+
+        // -- subscription --------------------------------------------------------------------
+        // A subscription whose product is ad-free means the channel is never stitched, so the
+        // playlist machinery has nothing to do there and stands back for the visit. Detection
+        // only ever removes work: a refused or unreadable answer leaves everything armed.
+        DetectSubscription: true,
 
         // -- overlay / squeezeback ads -------------------------------------------------------
         // Nothing is stitched in and the stream never stops: the picture shrinks, or a pod plays
@@ -143,6 +149,11 @@
         workers: [],
         playerAdEvent: null,
         gqlTokenMode: 'persisted',
+        // Channel we have stood back from, and the channel already asked about -- asking is once
+        // per visit, so a negative answer is not re-sent on every playlist poll.
+        subAdFree: null,
+        subAskedFor: null,
+        subBannerUntil: 0,
         counters: { breaks: 0, reloads: 0, backupFailures: 0, recoveries: 0, deadPlayers: 0, continuityBreaks: 0 }
     };
 
@@ -813,13 +824,18 @@
             overlay.style.display = 'none';
             root.appendChild(overlay);
         }
+        // The stand-back notice is an announcement and expires; a break is a state and holds the
+        // overlay for as long as it lasts, so it wins when the two ever overlap.
+        const announcing = State.subAdFree !== null && Date.now() < State.subBannerUntil;
         const text = overlay.querySelector('p');
         if (text) {
             // No backup player type: the banner ends up in screenshots and recordings. It stays in
             // the console and in status().
-            text.textContent = 'Blocking' + (State.adIsMidroll ? ' midroll' : '') + ' ads';
+            text.textContent = State.adActive
+                ? 'Blocking' + (State.adIsMidroll ? ' midroll' : '') + ' ads'
+                : 'Sub detected -- standing back';
         }
-        overlay.style.display = State.adActive ? 'block' : 'none';
+        overlay.style.display = (State.adActive || announcing) ? 'block' : 'none';
     }
 
     // Switching channel replaces the stream without a reload, and the playlist that would report
@@ -866,6 +882,11 @@
         State.adIsMidroll = false;
         State.activeBackupPlayerType = null;
         State.playerAdEvent = null;
+        // Re-armed by default: the next channel is asked about on its own, and until it answers
+        // the playlist machinery runs as usual.
+        State.subAdFree = null;
+        State.subAskedFor = null;
+        State.subBannerUntil = 0;
         // Buffer depth belongs to the playback that measured it: comparing it with another
         // channel's is the same mistake as the "STALLED -42.604s" one.
         State.depthAtBreak = null;
@@ -1355,6 +1376,69 @@
                 postToWorkers({ key: message, value });
             }
         }
+        // Earliest point at which the check can carry the page's own credentials. Without one it
+        // is never asked at all: logged out there is no subscription to find, and an anonymous
+        // answer cannot say anything either way.
+        if (GQL.authorization) {
+            detectSubscription(channelFromLocation());
+        }
+    }
+
+    // AdRequestHandling carries the viewer's relationship with the channel. Asked for on its own
+    // rather than read out of Twitch's own batch: that batch carries dozens of operations and its
+    // answer lands after the master playlist has already been requested, which is too late to
+    // stand anything down. Alone it is one small round trip, and it fits in the gap before it.
+    const AD_REQUEST_HANDLING_HASH = '61a5ecca6da3d924efa9dbde811e051b8a10cb6bd0fe22c372c2f4401f3e88d1';
+
+    // Long enough to read, short enough to stay out of recordings. The lasting record is the
+    // console line and status(), the same split the backup player type already uses.
+    const SUB_BANNER_MS = 10000;
+
+    // self is null without credentials, subscriptionBenefit is null without a subscription, and a
+    // subscription can exist on a product that is not ad-free: all three fall to false, so every
+    // way of not knowing leaves us armed.
+    function subscriptionIsAdFree(answer) {
+        return answer?.data?.user?.self?.subscriptionBenefit?.product?.hasAdFree === true;
+    }
+
+    function detectSubscription(channel) {
+        if (!Config.DetectSubscription || !channel || State.subAskedFor === channel) {
+            return;
+        }
+        State.subAskedFor = channel;
+        const realFetch = window.__vaft2RealFetch || window.fetch;
+        const headers = { 'Client-ID': GQL.clientId, 'Content-Type': 'text/plain;charset=UTF-8' };
+        if (GQL.authorization) { headers['Authorization'] = GQL.authorization; }
+        if (GQL.deviceId) { headers['X-Device-Id'] = GQL.deviceId; }
+        // isVOD, not isVod: PlaybackAccessToken spells the same idea with a lowercase d and the
+        // two documents do not accept each other's spelling.
+        const body = [{
+            operationName: 'AdRequestHandling',
+            variables: { isLive: true, login: channel, isVOD: false, vodID: '', isCollection: false, collectionID: '' },
+            extensions: { persistedQuery: { version: 1, sha256Hash: AD_REQUEST_HANDLING_HASH } }
+        }];
+        realFetch('https://gql.twitch.tv/gql', { method: 'POST', headers, body: JSON.stringify(body) })
+            .then((response) => (response.ok ? response.json() : null))
+            .then((json) => {
+                const answer = Array.isArray(json) ? json[0] : json;
+                // The answer describes the channel it was asked about, not the one being watched
+                // now: a fast channel change would otherwise stand back on the wrong stream.
+                if (!answer || channel !== channelFromLocation() || !subscriptionIsAdFree(answer)) {
+                    return;
+                }
+                State.subAdFree = channel;
+                State.subBannerUntil = Date.now() + SUB_BANNER_MS;
+                log('info', 'ad-free subscription here:' +
+                    ' standing back from playlist handling for this visit');
+                postToWorkers({ key: 'StandBack', value: channel });
+                updateBanner();
+                setTimeout(updateBanner, SUB_BANNER_MS + 100);
+            })
+            .catch((err) => {
+                // Not retried: staying armed is the safe answer, and a retry loop on a failing
+                // endpoint would ask once per playlist poll.
+                log('debug', 'subscription check failed: ' + err);
+            });
     }
 
     function rewriteGqlBody(init, realFetch) {
@@ -1438,6 +1522,9 @@ var streamsByPlaylistUrl = Object.create(null);
 var adSegments = new Map();
 var pendingFetches = new Map();
 var lastReloadAt = 0;
+// Channels the page told us are subscribed with an ad-free product. Keyed by channel because a
+// visit can leave and come back, and the answer belongs to the channel it was asked about.
+var standBack = Object.create(null);
 var onceMessages = new Map();
 var workerRealFetch = null;
 
@@ -1736,7 +1823,7 @@ function onMasterPlaylist(url, text, realFetch) {
     // opening the lane only when that arrives leaves a preroll -- which by definition lands on
     // an empty ledger -- with nothing to serve. Per player type, not per rung, so it costs one
     // token and one usher for the whole channel.
-    if (realFetch && CONFIG.backupPlayerTypes.length) {
+    if (realFetch && CONFIG.backupPlayerTypes.length && !standBack[channel]) {
         fetchBackupMaster(stream, CONFIG.backupPlayerTypes[0], realFetch)
             .catch(function () {});
     }
@@ -2255,6 +2342,16 @@ function traceRequested(url) {
 function onMediaPlaylist(url, text, realFetch) {
     var stream = streamsByPlaylistUrl[url];
     if (!stream) { return Promise.resolve(text); }
+    if (standBack[stream.channel]) {
+        // Read but never rewritten. One indexOf per poll is what turns a wrong stand-down from
+        // silent into visible: the ledger is cold here, so this cannot save the break it sees --
+        // it re-arms for the ones after it and says so.
+        if (!hasAdMarkers(text)) { return Promise.resolve(text); }
+        delete standBack[stream.channel];
+        wlog('warn', 'a stitched body arrived while standing back:' +
+            ' re-arming, this break is not covered');
+        self.postMessage({ key: 'StandBackBroken', channel: stream.channel });
+    }
     stream.currentVariant = stream.variants[url] || stream.currentVariant;
 
     var lane = laneFor(stream, url, realFetch);
@@ -2407,7 +2504,7 @@ function installFetchHook() {
 var OUR_MESSAGE_KEYS = {
     UpdateDeviceId: 1, UpdateClientVersion: 1, UpdateClientSession: 1,
     UpdateIntegrity: 1, UpdateAuthorization: 1, PlayerReloaded: 1, FetchResponse: 1,
-    ChannelChanged: 1
+    ChannelChanged: 1, StandBack: 1
 };
 
 // Registered before Twitch's worker is loaded, so this listener runs first and can stop our own
@@ -2434,6 +2531,7 @@ self.addEventListener('message', function (e) {
         // survive on purpose; the backup in use does not, and dropping the lanes is what releases
         // it -- coming back the player is a new session, and a ledger or a floor from the previous
         // visit describes numbers it never asked for.
+        delete standBack[data.value];
         var left = data.value && streamsByChannel[data.value];
         if (left) {
             left.adActive = false;
@@ -2443,6 +2541,18 @@ self.addEventListener('message', function (e) {
             var urls = left.variants ? Object.keys(left.variants) : [];
             for (var u = 0; u < urls.length; u++) { delete traceLastRequest[urls[u]]; delete traceSegDur[urls[u]]; }
         }
+        return;
+    }
+    if (data.key === 'StandBack') {
+        standBack[data.value] = true;
+        // Whatever the lane already opened is released here: the token and the usher for the
+        // backup may have gone out before the answer came back, and holding a warm lane we have
+        // decided never to use is the cost this whole check exists to avoid.
+        var quiet = streamsByChannel[data.value];
+        if (quiet) { quiet.lanes = {}; }
+        // At debug: this message is broadcast to every hooked worker, so an info line here says
+        // the same thing once per worker. The page announces the decision once, on its own.
+        wlog('debug', 'standing back: ad-free subscription');
         return;
     }
     if (data.key === 'UpdateAuthorization') { GQLState.authorization = data.value; return; }
@@ -2568,6 +2678,15 @@ installFetchHook();
                                 : 'no clean stream available, stripping ad segments');
                             updateBanner();
                             break;
+                        case 'StandBackBroken':
+                            State.subAdFree = null;
+                            State.subBannerUntil = 0;
+                            // Not re-asked: the answer was believed once and was wrong, so the
+                            // rest of the visit runs armed.
+                            log('warn', 'stood back, but the stream is stitched' +
+                                ' after all -- armed again');
+                            updateBanner();
+                            break;
                         case 'ContinuityBreak':
                             // The worker saw the player ask for a number that is not the next one
                             // we served. Nothing about this line is channel-specific: it is our own
@@ -2631,6 +2750,7 @@ installFetchHook();
                 adIsMidroll: State.adIsMidroll,
                 backupPlayerType: State.activeBackupPlayerType,
                 playerAdEvent: State.playerAdEvent,
+                subAdFree: State.subAdFree,
                 tokenMode: State.gqlTokenMode,
                 counters: Object.assign({}, State.counters),
                 layers: {
