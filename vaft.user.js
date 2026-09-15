@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      2.2.1
+// @version      2.2.2
 // @description  Twitch ad blocking
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -105,6 +105,8 @@
 
         // -- diagnostics ---------------------------------------------------------------------
         ShowBanner: true,
+        // Faded, blurred and slightly shrunk, for a banner that is noticed rather than read.
+        BlurBanner: false,
         // 'debug' | 'info' | 'warn' | 'off'
         LogLevel: 'info',
         // Report the player's own stitchedadstart/stitchedadend next to our own detection: one
@@ -810,6 +812,13 @@
 
     function updateBanner() {
         if (!Config.ShowBanner) {
+            // Swept, not just skipped: the switch can be flipped through window.vaft2.config with
+            // the overlay already up.
+            try {
+                document.querySelectorAll('.vaft2-overlay').forEach((el) => { el.remove(); });
+            } catch (err) {
+                log('debug', 'could not remove the banner: ' + err);
+            }
             return;
         }
         const root = document.querySelector('.video-player');
@@ -820,7 +829,9 @@
         if (!overlay) {
             overlay = document.createElement('div');
             overlay.className = 'vaft2-overlay';
-            overlay.innerHTML = '<div style="color:white;background-color:rgba(0,0,0,0.8);position:absolute;top:0;left:0;padding:5px;"><p></p></div>';
+            overlay.innerHTML = Config.BlurBanner
+                ? '<div style="color:white;position:absolute;top:0;left:0;padding:5px;transition:all 0.2s ease;opacity: 0.25;filter:blur(1px);transform:scale(0.98)"><p></p></div>'
+                : '<div style="color:white;position:absolute;top:0;left:0;padding:5px;"><p></p></div>';
             overlay.style.display = 'none';
             root.appendChild(overlay);
         }
@@ -832,8 +843,8 @@
             // No backup player type: the banner ends up in screenshots and recordings. It stays in
             // the console and in status().
             text.textContent = State.adActive
-                ? 'Blocking' + (State.adIsMidroll ? ' midroll' : '') + ' ads'
-                : 'Sub detected -- standing back';
+                ? 'NoAD'
+                : 'Sub';
         }
         overlay.style.display = (State.adActive || announcing) ? 'block' : 'none';
     }
