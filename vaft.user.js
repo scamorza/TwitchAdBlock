@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAd (vaft)
 // @namespace    https://github.com/scamorza/TwitchAdBlock
-// @version      2.2.2
+// @version      2.2.3
 // @description  Twitch ad blocking
 // @updateURL    https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
 // @downloadURL  https://github.com/scamorza/TwitchAdBlock/raw/master/vaft.user.js
@@ -104,9 +104,20 @@
         RecoverDeadPlayer: true,
 
         // -- diagnostics ---------------------------------------------------------------------
+        // The mark drawn over the player while an ad is being blocked, and its appearance. These
+        // five are the ones a viewer changes, so they are the ones kept across an update --
+        // through window.vaft2.banner(), which stores them; assigning to config alone does not.
+        // Standing back on a subscribed channel is reported in the console and in status(),
+        // never on screen.
         ShowBanner: true,
-        // Faded, blurred and slightly shrunk, for a banner that is noticed rather than read.
+        // Faded and blurred, for a mark that is noticed rather than read.
         BlurBanner: false,
+        // Side of the mark, in pixels.
+        SizeBanner: 20,
+        // Any CSS color.
+        ColorBanner: 'white',
+        // Colour of the halo that carries the mark over a scene of its own colour. Empty for none.
+        HaloBanner: 'rgba(0,0,0,.9)',
         // 'debug' | 'info' | 'warn' | 'off'
         LogLevel: 'info',
         // Report the player's own stitchedadstart/stitchedadend next to our own detection: one
@@ -155,7 +166,6 @@
         // per visit, so a negative answer is not re-sent on every playlist poll.
         subAdFree: null,
         subAskedFor: null,
-        subBannerUntil: 0,
         counters: { breaks: 0, reloads: 0, backupFailures: 0, recoveries: 0, deadPlayers: 0, continuityBreaks: 0 }
     };
 
@@ -810,6 +820,73 @@
         }, 3000);
     }
 
+    // Octagon with the raised hand cut out of it, as one filled path.
+    const MARK_PATH = 'M7.775 0a1.8 1.8 0 0 0-1.273.527L.528 6.503A1.8 1.8 0 0 0 0 7.775v8.45c0 .' +
+        '478.19.936.528 1.274l5.974 5.974A1.8 1.8 0 0 0 7.775 24h8.45a1.8 1.8 0 0 0 1.273-.527l5.' +
+        '975-5.974A1.8 1.8 0 0 0 24 16.225v-8.45a1.8 1.8 0 0 0-.527-1.272L17.498.527A1.8 1.8 0 0 ' +
+        '0 16.225 0zm4.427 3c1.02 0 .958 1.108.958 1.108v6.784s-.009.218.16.218c.188 0 .175-.226.' +
+        '175-.226l-.002-5.63s-.05-.986.959-.986c1.01 0 .97.983.97.983v7.621s.014.158.141.158c.127' +
+        ' 0 .944-2.122.944-2.122s.451-1.497 2.576-1.1c.038.008-.167.688-.167.688l-2.283 6.556S15.' +
+        '69 20.7 11.714 20.7c-5.044 0-4.808-5.407-4.814-5.405V7.562s-.016-.99.897-.99c.858 0 .849' +
+        '.99.849.99l.007 3.583s-.004.172.167.172c.16 0 .141-.172.141-.172l.01-5.926s-.055-1.162.9' +
+        '66-1.162c1.04 0 .983 1.142.983 1.142v5.611s-.005.204.152.204c.168 0 .154-.206.154-.206l.' +
+        '01-6.693S11.18 3 12.202 3Z';
+
+    // The script file is replaced by every update, so an edit to Config does not survive one.
+    const BANNER_KEY = 'vaft2-banner';
+    const BANNER_DEFAULTS = {
+        ShowBanner: Config.ShowBanner,
+        BlurBanner: Config.BlurBanner,
+        SizeBanner: Config.SizeBanner,
+        ColorBanner: Config.ColorBanner,
+        HaloBanner: Config.HaloBanner
+    };
+
+    // A stored setting is honoured only while it still exists here and still holds the same kind
+    // of value: one that has been renamed or repurposed is dropped rather than half-applied.
+    function bannerPrefIsUsable(name, value) {
+        return Object.prototype.hasOwnProperty.call(BANNER_DEFAULTS, name) &&
+            typeof value === typeof BANNER_DEFAULTS[name];
+    }
+
+    function loadBannerPrefs() {
+        let stored = null;
+        try {
+            stored = JSON.parse(localStorage.getItem(BANNER_KEY) || '{}');
+        } catch (err) {
+            log('debug', 'unreadable banner settings, staying on the defaults: ' + err);
+            return;
+        }
+        if (!stored || typeof stored !== 'object') {
+            return;
+        }
+        Object.keys(stored).forEach((name) => {
+            if (bannerPrefIsUsable(name, stored[name])) {
+                Config[name] = stored[name];
+            }
+        });
+    }
+
+    // Only what differs is written, and the key is removed once nothing does: a stored copy of
+    // today's default would pin it against a later one.
+    function saveBannerPrefs() {
+        const kept = {};
+        Object.keys(BANNER_DEFAULTS).forEach((name) => {
+            if (Config[name] !== BANNER_DEFAULTS[name]) {
+                kept[name] = Config[name];
+            }
+        });
+        try {
+            if (Object.keys(kept).length) {
+                localStorage.setItem(BANNER_KEY, JSON.stringify(kept));
+            } else {
+                localStorage.removeItem(BANNER_KEY);
+            }
+        } catch (err) {
+            log('debug', 'could not store the banner settings: ' + err);
+        }
+    }
+
     function updateBanner() {
         if (!Config.ShowBanner) {
             // Swept, not just skipped: the switch can be flipped through window.vaft2.config with
@@ -829,24 +906,41 @@
         if (!overlay) {
             overlay = document.createElement('div');
             overlay.className = 'vaft2-overlay';
-            overlay.innerHTML = Config.BlurBanner
-                ? '<div style="color:white;position:absolute;top:0;left:0;padding:5px;transition:all 0.2s ease;opacity: 0.25;filter:blur(1px);transform:scale(0.98)"><p></p></div>'
-                : '<div style="color:white;position:absolute;top:0;left:0;padding:5px;"><p></p></div>';
+            // Drawn inline rather than loaded: an <img> is a resource fetch and the page's own
+            // content policy governs those, data: URIs included. A filled path taking
+            // currentColor also lets the one glyph serve every variant.
+            overlay.innerHTML =
+                '<div class="vaft2-mark" style="position:absolute;top:0;left:0;' +
+                'padding:5px;transition:all 0.2s ease">' +
+                '<svg viewBox="0 0 24 24" fill="currentColor" role="img"' +
+                ' aria-label="ad blocked" style="display:block"><path d="' + MARK_PATH + '"/>' +
+                '</svg></div>';
             overlay.style.display = 'none';
             root.appendChild(overlay);
         }
-        // The stand-back notice is an announcement and expires; a break is a state and holds the
-        // overlay for as long as it lasts, so it wins when the two ever overlap.
-        const announcing = State.subAdFree !== null && Date.now() < State.subBannerUntil;
-        const text = overlay.querySelector('p');
-        if (text) {
-            // No backup player type: the banner ends up in screenshots and recordings. It stays in
-            // the console and in status().
-            text.textContent = State.adActive
-                ? 'NoAD'
-                : 'Sub';
+        // Re-read on every pass: the settings are reachable through window.vaft2.config with the
+        // overlay already up.
+        const mark = overlay.querySelector('.vaft2-mark');
+        if (mark) {
+            // drop-shadow traces the glyph's own alpha, not its box: an edge over a bright scene
+            // without bringing back a panel. Blur first, so the halo follows the softened shape.
+            mark.style.color = (typeof Config.ColorBanner === 'string' && Config.ColorBanner)
+                ? Config.ColorBanner
+                : 'white';
+            mark.style.opacity = Config.BlurBanner ? '0.25' : '';
+            const halo = (typeof Config.HaloBanner === 'string' && Config.HaloBanner)
+                ? 'drop-shadow(0 0 2px ' + Config.HaloBanner + ')'
+                : '';
+            mark.style.filter = [Config.BlurBanner ? 'blur(1px)' : '', halo]
+                .filter(Boolean).join(' ');
         }
-        overlay.style.display = (State.adActive || announcing) ? 'block' : 'none';
+        const glyph = overlay.querySelector('svg');
+        if (glyph) {
+            const side = Number(Config.SizeBanner) > 0 ? Number(Config.SizeBanner) : 20;
+            glyph.style.width = side + 'px';
+            glyph.style.height = side + 'px';
+        }
+        overlay.style.display = State.adActive ? 'block' : 'none';
     }
 
     // Switching channel replaces the stream without a reload, and the playlist that would report
@@ -897,7 +991,6 @@
         // the playlist machinery runs as usual.
         State.subAdFree = null;
         State.subAskedFor = null;
-        State.subBannerUntil = 0;
         // Buffer depth belongs to the playback that measured it: comparing it with another
         // channel's is the same mistake as the "STALLED -42.604s" one.
         State.depthAtBreak = null;
@@ -1401,10 +1494,6 @@
     // stand anything down. Alone it is one small round trip, and it fits in the gap before it.
     const AD_REQUEST_HANDLING_HASH = '61a5ecca6da3d924efa9dbde811e051b8a10cb6bd0fe22c372c2f4401f3e88d1';
 
-    // Long enough to read, short enough to stay out of recordings. The lasting record is the
-    // console line and status(), the same split the backup player type already uses.
-    const SUB_BANNER_MS = 10000;
-
     // self is null without credentials, subscriptionBenefit is null without a subscription, and a
     // subscription can exist on a product that is not ad-free: all three fall to false, so every
     // way of not knowing leaves us armed.
@@ -1438,12 +1527,9 @@
                     return;
                 }
                 State.subAdFree = channel;
-                State.subBannerUntil = Date.now() + SUB_BANNER_MS;
                 log('info', 'ad-free subscription here:' +
                     ' standing back from playlist handling for this visit');
                 postToWorkers({ key: 'StandBack', value: channel });
-                updateBanner();
-                setTimeout(updateBanner, SUB_BANNER_MS + 100);
             })
             .catch((err) => {
                 // Not retried: staying armed is the safe answer, and a retry loop on a failing
@@ -2691,12 +2777,10 @@ installFetchHook();
                             break;
                         case 'StandBackBroken':
                             State.subAdFree = null;
-                            State.subBannerUntil = 0;
                             // Not re-asked: the answer was believed once and was wrong, so the
                             // rest of the visit runs armed.
                             log('warn', 'stood back, but the stream is stitched' +
                                 ' after all -- armed again');
-                            updateBanner();
                             break;
                         case 'ContinuityBreak':
                             // The worker saw the player ask for a number that is not the next one
@@ -2797,6 +2881,28 @@ installFetchHook();
             Config.LogLevel = level;
         },
         reloadPlayer,
+        // The way to change how the mark looks, because a plain assignment to config cannot be
+        // seen and so would be applied but never stored. No argument reads the settings back,
+        // null restores the shipped defaults.
+        banner(changes) {
+            if (changes === null) {
+                Object.assign(Config, BANNER_DEFAULTS);
+            } else if (changes) {
+                const rejected = Object.keys(changes)
+                    .filter((name) => !bannerPrefIsUsable(name, changes[name]));
+                if (rejected.length) {
+                    console.log('[VAFT2] not a banner setting, or not the kind of value it takes: ' +
+                        rejected.join(', '));
+                    return undefined;
+                }
+                Object.assign(Config, changes);
+            }
+            saveBannerPrefs();
+            updateBanner();
+            const current = {};
+            Object.keys(BANNER_DEFAULTS).forEach((name) => { current[name] = Config[name]; });
+            return current;
+        },
         // Read off the object, so a new entry point cannot be added and forgotten here. Names in
         // full: a bare 'status()' is not something you can paste into a console.
         help() {
@@ -2813,6 +2919,7 @@ installFetchHook();
     installFetchHook();
     installWorkerHook();
     applyQualityPreference(Config.PinHighestQuality);
+    loadBannerPrefs();
 
     // Whether the tab was already hidden at document-start decides if the one-shot
     // visibilitychange allowance is needed at all.
